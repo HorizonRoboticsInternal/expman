@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Explore TensorBoard experiments, compare YAML configurations, and understand your results.">
+  <title>Expman · Experiment workbench</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233f62e8'/%3E%3Cpath d='M7 24V14m6 10V7m6 17V11m6 13V4' stroke='white' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/assets/plotly.min.js"></script>
+  <script defer src="/static/appearance.js"></script>
+  <script defer src="/static/panels.js"></script>
+  <script defer src="/static/configurations.js"></script>
+  <script defer src="/static/relationships.js"></script>
+  <script defer src="/static/signals.js"></script>
+  <script defer src="/static/filters.js"></script>
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#view">Skip to workspace</a>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Expman home"><span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" aria-hidden="true"><path d="M3 20V11m6 9V5m6 15V9m6 11V2"/></svg></span>expman<span class="version">LOCAL</span></a>
+    <div class="project"><span class="project-avatar">E</span><div><small>WORKSPACE</small><strong id="project-name">Loading…</strong></div></div>
+    <p class="nav-heading">EXPLORE</p>
+    <nav id="navigation" aria-label="Workspace views"></nav>
+    <p class="nav-heading split">COLLECTIONS<button class="icon-button" data-action="new-group" aria-label="Create a group">+</button></p>
+    <div id="collections"></div>
+    <div id="groups"></div>
+    <div class="sidebar-bottom"><span class="connection-dot"></span><strong>Local filesystem</strong><code id="source-path">Connecting…</code><button class="text-button" data-action="help">How this workspace works ↗</button></div>
+  </aside>
+  <main>
+    <header class="topbar"><div class="breadcrumbs">Workspace <span>/</span> <strong id="breadcrumb">Experiments</strong></div><div class="top-actions"><span id="activity" role="status" aria-live="polite">Connecting…</span><button class="button" data-action="json-metrics">JSON metrics</button><button class="button" data-action="appearance">Aa Appearance</button><button class="button" data-action="refresh" id="refresh-button">↻ Refresh</button><label class="auto-refresh"><input type="checkbox" id="auto-refresh"> Auto refresh</label></div></header>
+    <div class="workspace">
+      <div class="page-heading"><div><div class="eyebrow">EXPERIMENT WORKBENCH</div><h1 id="page-title">Overview</h1><p id="page-description">Every run tells a story. Compare the evidence.</p></div><div class="heading-actions"><button class="button" data-action="exports">↓ Export</button><button class="button primary" data-action="new-group">+ Create group</button></div></div>
+      <div id="stats" class="stats"></div>
+      <section class="selection-bar" aria-label="Run selection"><div class="search-box"><span aria-hidden="true">⌕</span><input id="run-search" type="search" placeholder="Search experiments, tags, or config values…" aria-label="Search experiments"><kbd>/</kbd></div><div class="selection-count"><strong id="selected-count">0</strong> selected <span id="hidden-selection"></span></div><button class="text-button" data-action="select-visible">Select visible</button><button class="text-button" data-action="clear-selection">Clear</button></section>
+      <div class="named-filter-bar" aria-label="Experiment filters">
+        <button class="button compact" data-action="filters">⚑ Filters <span id="filter-count"></span></button><button class="button compact" id="clear-all-filters" data-action="clear-all-filters" hidden disabled>Clear all filters</button>
+        <label>Named filter <select id="named-filter-choice" aria-label="Named experiment filter"></select></label>
+        <button class="button compact" id="apply-named-filter" data-action="apply-named-filter">Apply view</button>
+        <button class="button compact" id="select-named-filter" data-action="select-named-filter" title="Replace selected experiments with matching unarchived runs">Select matching</button>
+        <button class="button compact" id="edit-named-filter" data-action="edit-named-filter">Edit</button>
+        <button class="text-button" data-action="new-named-filter">+ New named filter</button>
+      </div>
+      <div id="selection-chips" class="selection-chips"></div>
+      <section id="view" tabindex="-1" aria-label="Workspace content"><div class="empty"><div class="spinner"></div><h2>Opening your workspace</h2><p>Discovering experiment directories and YAML configurations.</p></div></section>
+      <footer class="workspace-footer"><span>Read-only logs. Your annotations stay in a separate workspace file.</span><a href="/design" target="_blank" rel="noopener">Design document ↗</a></footer>
+    </div>
+  </main>
+  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+  <dialog id="panel-dialog" class="expanded-panel" aria-labelledby="panel-dialog-title"></dialog>
+  <div id="toast" role="alert" class="toast" hidden></div>
+  <noscript><div class="fatal">JavaScript is required to use the experiment workbench.</div></noscript>
+</body>
+</html>

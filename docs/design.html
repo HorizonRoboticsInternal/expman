@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Expman technical design: a uv-managed local experiment dashboard for TensorBoard logs, YAML configuration comparisons, grouped curves, and condition analysis.">
+  <meta name="color-scheme" content="light">
+  <title>Expman Design</title>
+  <style>
+    :root { --ink: #17263e; --muted: #596b82; --accent: #345bd7; --line: #dce3ed; --paper: #fff; --canvas: #f5f7fb; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 30px; }
+    body { margin: 0; background: var(--canvas); color: var(--ink); font: 15px/1.75 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    a:hover { color: #173694; }
+    a:focus-visible { outline: 3px solid #7797ff; outline-offset: 4px; border-radius: 2px; }
+    .skip-link { position: fixed; top: -80px; left: 16px; z-index: 5; padding: 10px 20px; background: var(--paper); }
+    .skip-link:focus { top: 12px; }
+    .sidebar { position: fixed; inset: 0 auto 0 0; width: 252px; overflow-y: auto; background: #f0f3f9; border-right: 1px solid var(--line); padding: 35px 25px 22px; }
+    .brand { display: flex; gap: 11px; align-items: center; color: var(--ink); text-decoration: none; font-size: 21px; font-weight: 750; letter-spacing: -.7px; }
+    .brand-mark { width: 31px; height: 31px; border-radius: 8px; background: var(--accent); display: grid; place-items: center; }
+    .brand-mark svg { width: 20px; height: 20px; }
+    .sidebar-label { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: 1.5px; margin: 36px 0 12px; text-transform: uppercase; }
+    .toc ul { margin: 0; padding: 0; list-style: none; }
+    .toc > ul > li { margin: 3px 0; }
+    .toc a { display: block; padding: 7px 9px; border-radius: 6px; text-decoration: none; color: #44546d; font-size: 12px; line-height: 1.5; }
+    .toc a:hover { color: var(--accent); background: #e4eafa; }
+    .toc ul ul { border-left: 1px solid #cbd5e7; margin: 4px 0 9px 9px; padding-left: 8px; }
+    .toc ul ul a { font-size: 11px; }
+    .sidebar-foot { border-top: 1px solid var(--line); margin-top: 26px; padding-top: 17px; font-size: 11px; color: var(--muted); }
+    main { margin: 36px 34px 50px 286px; max-width: 1110px; background: var(--paper); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 5px 28px #17263e04; }
+    .document-top { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 17px 45px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: 1.5px; text-transform: uppercase; }
+    .status { display: inline-flex; align-items: center; gap: 7px; padding: 4px 10px; background: #edf2ff; color: #3655ad; border: 1px solid #dce5ff; border-radius: 20px; letter-spacing: .1px; text-transform: none; font-size: 11px; font-weight: 600; white-space: nowrap; }
+    .status::before { content: ""; width: 5px; height: 5px; background: #5476d9; border-radius: 50%; }
+    article { padding: 33px 45px 36px; }
+    h1, h2, h3 { line-height: 1.3; letter-spacing: -.6px; }
+    h1 { font-size: clamp(32px, 4vw, 43px); margin: 0 0 18px; letter-spacing: -1.7px; }
+    .intro { max-width: 830px; font-size: 17px; color: #4d607a; line-height: 1.8; margin-bottom: 30px; }
+    .intro p { margin: 0; }
+    .summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 41px; }
+    .summary-item { border: 1px solid var(--line); border-radius: 8px; padding: 15px 16px; background: #fafbfe; }
+    .summary-item small { display: block; font-size: 9px; color: var(--muted); font-weight: 650; text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 5px; }
+    .summary-item strong { font-size: 13px; font-weight: 600; }
+    h2 { margin: 45px 0 16px; padding-top: 21px; border-top: 1px solid var(--line); font-size: 23px; }
+    h3 { margin: 27px 0 10px; font-size: 17px; }
+    p { margin: 12px 0 17px; }
+    ul, ol { padding-left: 24px; margin: 13px 0 20px; }
+    li { padding-left: 3px; margin: 7px 0; }
+    li::marker { color: #667b9c; }
+    strong { font-weight: 650; }
+    code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: .85em; }
+    :not(pre) > code { border: 1px solid #e2e8f3; background: #f4f6fb; color: #354c72; padding: 2px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+    pre { background: #18263c; color: #e0e8f6; padding: 22px 24px; border-radius: 9px; overflow-x: auto; line-height: 1.8; margin: 20px 0 23px; }
+    pre code { font-size: 12px; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; margin: 19px 0 25px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; line-height: 1.65; }
+    th { text-align: left; background: #f2f5fa; font-weight: 650; color: #435772; font-size: 11px; letter-spacing: .15px; }
+    th, td { padding: 12px 15px; vertical-align: top; }
+    td { border-top: 1px solid var(--line); }
+    td:first-child { width: 25%; min-width: 160px; font-weight: 550; color: #2c4160; }
+    tbody tr:nth-child(even) { background: #fbfcfe; }
+    .architecture { padding: 21px 18px 14px; background: #f8faff; border: 1px solid var(--line); border-radius: 10px; margin: 23px 0 27px; }
+    .architecture svg { width: 100%; height: auto; display: block; min-width: 500px; }
+    .architecture { overflow-x: auto; }
+    .diagram-box rect { fill: #fff; stroke: #ccd6e7; stroke-width: 1.3; }
+    .diagram-box text { fill: #344966; font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; }
+    .diagram-box.accent rect { fill: #edf2ff; stroke: #b1c3f7; }
+    .diagram-box.storage rect { fill: #edf7f4; stroke: #b8d8cc; }
+    figcaption { color: var(--muted); font-size: 11px; padding: 5px 8px; text-align: center; }
+    .document-footer { display: flex; justify-content: space-between; gap: 18px; padding: 20px 45px; background: #fafbfe; border-top: 1px solid var(--line); border-radius: 0 0 14px 14px; font-size: 11px; color: var(--muted); }
+    @media (min-width: 1500px) { main { margin-left: max(286px, calc((100vw - 1110px + 252px) / 2)); } }
+    @media (max-width: 1050px) { .sidebar { width: 218px; padding: 28px 16px; } main { margin: 22px 20px 32px 238px; } article { padding: 28px; } .document-top, .document-footer { padding-left: 28px; padding-right: 28px; } .summary { gap: 8px; } .summary-item { padding: 11px; } }
+    @media (max-width: 760px) { .sidebar { position: static; width: auto; padding: 20px; border-right: 0; border-bottom: 1px solid var(--line); } .sidebar-label { margin: 19px 0 8px; } .toc > ul { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; } .toc ul ul, .sidebar-foot { display: none; } main { margin: 16px 12px 30px; } article { padding: 24px 20px; } .document-top, .document-footer { padding: 15px 20px; } h2 { font-size: 21px; } .intro { font-size: 16px; } .summary { grid-template-columns: 1fr; margin-bottom: 30px; } .summary-item { padding: 10px 13px; display: flex; align-items: center; gap: 12px; } .summary-item small { margin: 0; min-width: 88px; } .document-top { letter-spacing: .7px; } th, td { padding: 10px 12px; } .document-footer { flex-direction: column; gap: 5px; } }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    @media print { @page { margin: 18mm; } body { background: #fff; color: #000; font-size: 10pt; } .sidebar, .skip-link, .document-top, .document-footer { display: none; } main { margin: 0; border: 0; border-radius: 0; box-shadow: none; max-width: none; } article { padding: 0; } h1 { font-size: 27pt; } h2 { font-size: 16pt; margin-top: 24pt; break-after: avoid; } h3 { break-after: avoid; } .intro { font-size: 11pt; } .summary { margin-bottom: 20px; } .summary-item { background: #fff; } pre { background: #f2f4f7; color: #17263e; white-space: pre-wrap; overflow-wrap: anywhere; break-inside: avoid; } pre code { font-size: 8pt; } .table-wrap { overflow: visible; } table { font-size: 8.5pt; } thead { display: table-header-group; } tr { break-inside: avoid; } a { color: #17263e; } .architecture { break-inside: avoid; } .architecture svg { min-width: 0; } }
+  </style>
+</head>
+<body id="top">
+  <a class="skip-link" href="#document">Skip to design document</a>
+  <aside class="sidebar">
+    <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M4 17V9m6 8V5m6 12v-6m5 6V3"/></svg></span>expman</a>
+    <p class="sidebar-label">Design document</p>
+    <nav aria-label="Document contents"><div class="toc">
+<ul>
+<li><a href="#requirements">Requirements</a></li>
+<li><a href="#reference-dataset">Reference dataset</a></li>
+<li><a href="#architecture">Architecture</a></li>
+<li><a href="#user-interface">User interface</a></li>
+<li><a href="#discovery-and-ingestion">Discovery and ingestion</a><ul>
+<li><a href="#experiment-identity">Experiment identity</a></li>
+<li><a href="#event-handling">Event handling</a></li>
+</ul>
+</li>
+<li><a href="#configuration-semantics">Configuration semantics</a></li>
+<li><a href="#grouping-and-curve-mathematics">Grouping and curve mathematics</a></li>
+<li><a href="#condition-and-result-analysis">Condition and result analysis</a></li>
+<li><a href="#correlated-events-within-an-experiment">Correlated events within an experiment</a></li>
+<li><a href="#periodic-behavior-discovery-and-analysis">Periodic behavior discovery and analysis</a></li>
+<li><a href="#persistence-and-data-access">Persistence and data access</a></li>
+<li><a href="#api-outline">API outline</a></li>
+<li><a href="#development-and-operation">Development and operation</a></li>
+<li><a href="#validation-and-acceptance">Validation and acceptance</a></li>
+<li><a href="#implementation-sequence">Implementation sequence</a></li>
+</ul>
+</div>
+</nav>
+    <div class="sidebar-foot">Local experiment workbench<br>TensorBoard · YAML · uv</div>
+  </aside>
+  <main id="document">
+    <div class="document-top"><span>Architecture and product design</span><span class="status">Proposed design</span></div>
+    <article>
+      <header><h1>Expman Design</h1><div class="intro"><p>Expman is a local web application for exploring TensorBoard logs alongside the YAML configurations that produced them. It should help researchers compare experiments, average repeated runs, and investigate relationships between experimental conditions and logged outcomes. Python dependencies, packaging, and execution are managed with uv.</p></div></header>
+      <div class="summary" aria-label="Design overview">
+        <div class="summary-item"><small>Runtime</small><strong>One uv-managed Python service</strong></div>
+        <div class="summary-item"><small>Data source</small><strong>TensorBoard events and YAML</strong></div>
+        <div class="summary-item"><small>Reference</small><strong>HoloMotion experiment logs</strong></div>
+      </div>
+      <h2 id="requirements">Requirements</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>Expected behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Experiment discovery</td>
+<td>Discover experiments beneath a configured log directory, including nested event directories and directory aliases.</td>
+</tr>
+<tr>
+<td>TensorBoard functionality</td>
+<td>Provide the actual TensorBoard interface for standard plugins rather than limiting the application to custom scalar charts.</td>
+</tr>
+<tr>
+<td>Scalar exploration</td>
+<td>Compare selected runs with interactive charts, smoothing, axis controls, refresh, and exports.</td>
+</tr>
+<tr>
+<td>YAML comparison</td>
+<td>Show selected experiments side by side, with searchable configuration paths and a differences-only mode.</td>
+</tr>
+<tr>
+<td>Configuration exclusions</td>
+<td>Persist ignored configuration paths and file exclusions; restore them through the UI.</td>
+</tr>
+<tr>
+<td>Grouped curves</td>
+<td>Create named groups or group by configuration values, and show means with explicit variability bands.</td>
+</tr>
+<tr>
+<td>Condition analysis</td>
+<td>Relate numeric and categorical configuration values to a selected metric and outcome definition.</td>
+</tr>
+<tr>
+<td>Correlated events</td>
+<td>Detect spikes or abrupt changes across metrics within one experiment, inspect their chronological order, and measure lead/lag relationships.</td>
+</tr>
+<tr>
+<td>Periodic behavior</td>
+<td>Discover candidate cycles, inspect their stability, and compare periods and phase across metrics.</td>
+</tr>
+<tr>
+<td>Experiment management</td>
+<td>Support names, tags, notes, favorites, and archiving without modifying experiment files.</td>
+</tr>
+<tr>
+<td>Local operation</td>
+<td>Run with uv, serve frontend assets locally, and keep experiment data on the host.</td>
+</tr>
+</tbody>
+</table></div>
+<p>Distributed experiment execution, training control, hosted accounts, and artifact registries are outside the initial scope. Existing logs require no instrumentation changes.</p>
+<h2 id="reference-dataset">Reference dataset</h2>
+<p>Use <code>/data/weixu/log/holomotion</code> for development and acceptance testing. Its layout includes:</p>
+<pre><code class="language-text">holomotion/
+  exp081/
+    config.yaml
+    events.out.tfevents.*
+    &lt;timestamp&gt;/events.out.tfevents.*
+    &lt;timestamp&gt;/hparams.yml
+  exp000 -&gt; /horizon-bucket/.../holomotion
+  experiments.json
+  README.md
+</code></pre>
+<p>An initial discovery pass found 76 candidate experiments. A sample read of <code>exp081</code> found 1,435 flattened configuration fields, 88 scalar tags, and more than 65,000 scalar points. These observations establish a realistic workload, not fixed counts: experiments and logs can change while the app runs.</p>
+<p>Configuration views must handle more than a thousand fields through search and row virtualization or pagination. Discovery must distinguish experiment directories from timestamped logging subdirectories and auxiliary evaluation folders. JSON summaries and the dataset README are supplemental context; event files and YAML remain the authoritative inputs.</p>
+<h2 id="architecture">Architecture</h2>
+<p>Use one Python service with a bundled browser application. This keeps installation and startup within uv and avoids a separate Node build requirement.</p>
+<figure class="architecture" aria-labelledby="architecture-caption">
+<svg viewBox="0 0 900 330" role="img" aria-labelledby="diagram-title diagram-description">
+<title id="diagram-title">Expman application architecture</title>
+<desc id="diagram-description">The browser connects to FastAPI and mounted TensorBoard. FastAPI coordinates discovery, analysis, and workspace metadata. Discovery and TensorBoard read event logs and YAML. Workspace metadata is stored separately.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8b9bb4"/></marker></defs>
+<g class="edges" fill="none" stroke="#8b9bb4" stroke-width="1.7" marker-end="url(#arrow)">
+<path d="M170 160 H200 V86 H235"/><path d="M170 160 H200 V253 H235"/>
+<path d="M415 86 H450 V53 H485"/><path d="M415 86 H450 V145 H485"/><path d="M415 86 H450 V237 H485"/>
+<path d="M655 53 H730"/><path d="M655 237 H730"/><path d="M415 253 H465 V305 H700 V93 H730"/>
+</g>
+<g class="diagram-box"><rect x="10" y="130" width="160" height="60" rx="9"/><text x="90" y="165">Browser</text></g>
+<g class="diagram-box accent"><rect x="235" y="55" width="180" height="62" rx="9"/><text x="325" y="91">FastAPI API</text></g>
+<g class="diagram-box accent"><rect x="235" y="222" width="180" height="62" rx="9"/><text x="325" y="258">TensorBoard UI</text></g>
+<g class="diagram-box"><rect x="485" y="24" width="170" height="58" rx="9"/><text x="570" y="58">Discovery and reads</text></g>
+<g class="diagram-box"><rect x="485" y="116" width="170" height="58" rx="9"/><text x="570" y="150">Analysis</text></g>
+<g class="diagram-box"><rect x="485" y="208" width="170" height="58" rx="9"/><text x="570" y="242">Workspace metadata</text></g>
+<g class="diagram-box storage"><rect x="730" y="24" width="160" height="86" rx="9"/><text x="810" y="59">Event logs</text><text x="810" y="81">and YAML</text></g>
+<g class="diagram-box storage"><rect x="730" y="208" width="160" height="58" rx="9"/><text x="810" y="242">State file</text></g>
+</svg>
+<figcaption id="architecture-caption">One local service. Experiment inputs remain read-only; workspace metadata is stored separately.</figcaption>
+</figure>
+
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pyproject.toml</code>, <code>uv.lock</code></td>
+<td>Package metadata, CLI entry point, dependency groups, and reproducible resolution.</td>
+</tr>
+<tr>
+<td><code>src/expman/cli.py</code></td>
+<td><code>serve</code> and deterministic example-data commands.</td>
+</tr>
+<tr>
+<td><code>src/expman/app.py</code></td>
+<td>HTTP API, validation, static assets, and application lifecycle.</td>
+</tr>
+<tr>
+<td><code>src/expman/experiments.py</code></td>
+<td>Discovery, stable identifiers, incremental event reading, and summaries.</td>
+</tr>
+<tr>
+<td><code>src/expman/configs.py</code></td>
+<td>Safe YAML parsing, configuration provenance, exclusions, and comparisons.</td>
+</tr>
+<tr>
+<td><code>src/expman/analytics.py</code></td>
+<td>Curve alignment, aggregation, and descriptive statistical analysis.</td>
+</tr>
+<tr>
+<td><code>src/expman/store.py</code></td>
+<td>Atomic persistence of annotations, groups, and preferences.</td>
+</tr>
+<tr>
+<td><code>src/expman/native.py</code></td>
+<td>TensorBoard integration and lifecycle management.</td>
+</tr>
+<tr>
+<td><code>src/expman/static/</code></td>
+<td>HTML, CSS, and browser JavaScript shipped in the Python wheel.</td>
+</tr>
+<tr>
+<td><code>tests/</code></td>
+<td>Deterministic ingestion, API, statistical, and integration tests.</td>
+</tr>
+</tbody>
+</table></div>
+<p>Use FastAPI and Uvicorn for HTTP, TensorBoard for event compatibility, PyYAML for safe loading, NumPy for numerical operations, and Plotly for interactive charts. Serve Plotly's bundled JavaScript from the installed Python package so charts do not depend on a CDN.</p>
+<p>Mount TensorBoard beneath <code>/tensorboard/</code> on the same origin. Its own plugins provide scalars, images, histograms, distributions, text, graphs, embeddings, audio, and other supported logged data. Plugin availability depends on installed plugins and the data present. Verify asset URLs and plugin endpoints behind the mount, and manage ingestion workers during startup and shutdown. TensorBoard's broader visualization role is described in its <a href="https://www.tensorflow.org/tensorboard/get_started">official guide</a>.</p>
+<h2 id="user-interface">User interface</h2>
+<p>Use a persistent workspace sidebar, a searchable experiment table, and six main views:</p>
+<ol>
+<li><strong>Overview:</strong> selected-run chips, metric panels, grouping controls, smoothing, and axis settings.</li>
+<li><strong>Experiments:</strong> sortable runs with configurable metric and configuration columns, tags, favorites, notes, and archive controls.</li>
+<li><strong>Configurations:</strong> side-by-side values, a chosen baseline, differences-only filtering, configuration search, and exclusion management.</li>
+<li><strong>Relationships:</strong> outcome selection, ranked associations, condition plots, and parallel coordinates.</li>
+<li><strong>TensorBoard:</strong> embedded native TensorBoard with an option to open it separately.</li>
+<li><strong>Time series:</strong> a single-experiment investigation of spikes, dips, abrupt changes, event timing, periodic behavior, and phase relationships across metrics.</li>
+</ol>
+<p>In <strong>All panels</strong>, organize scalar tags into nested sections using each <code>/</code>-separated prefix, such as <code>Train</code> and <code>Train/loss</code>. Each section shows its matching panel count and can collapse independently. Exclude collapsed descendants from chart requests and persist collapsed prefixes in the log directory's saved view. Provide Expand all and Collapse all controls, show all expanded plot cards, and load viewport batches with at most 32 chart tags per request.</p>
+<p>Provide one Overview panel-size control with Small, Medium, and Large presets that change chart height and responsive panel width across all sections and pages. Put a Log Y toggle on each metric panel and persist its scale by tag. Each panel has an Expand button that opens a large dialog with the same data, current zoom, and its own synchronized Log Y control; closing it returns to the overview. Resizing, scale changes, and expansion reuse loaded chart data. Save size and scale preferences in the log directory's view, and migrate an older global Log Y preference to the saved panels.</p>
+<p>Compute Overview smoothing in the browser from cached raw observations, using TensorBoard 2.20's <a href="https://github.com/tensorflow/tensorboard/blob/2.20.0/tensorboard/components/vz_line_chart2/line-chart.ts#L690-L724">bias-corrected EMA</a>. Initialize the accumulator to zero, count finite observations, divide by one minus the smoothing weight raised to that count, and preserve constant and non-finite values. Keep the global slider and numeric input, and give every panel and its expanded view an independent slider and numeric input accepting 0 through 0.999. Changing the global value changes the default for newly displayed panels; an explicit Apply to all panels button copies it to every known panel, including collapsed and off-screen panels. Panel edits do not change global or other panel values. Persist global and per-tag values with the log directory's view. Coalesce slider input to animation frames, reuse raw data without curve requests or full-value job invalidation, and preserve colors, visibility, and zoom.</p>
+<p>Return raw member observations, indexed run origins, and group membership through an optional client-smoothing curve response. Smooth each experiment before axis deduplication, interpolation, group aggregation, variability bands, and display sampling. Recompute group means, counts, original means, elapsed times, and bands in the browser without extrapolation; retain every original observation when loading all values. Align backend smoothed configuration and outcome summaries with the same bias-corrected EMA on full histories. Older server responses remain readable and identify when a restart is required for browser smoothing.</p>
+<p>Place each panel's smoothing slider and numeric input inline with Log Y, Load all values, CSV, and Expand in the panel header's control group. Use a compact Smooth label, a 56px slider, a roughly 50px numeric input, tighter gaps, and an icon button for expansion with a descriptive accessible name and tooltip. Keep loaded-value status and progress inline at the same font size. On panels narrower than 380px, omit the redundant Smooth label and shorten the slider further; retain accessible names and keyboard operation. Keep controls on one line at ordinary Small, Medium, and Large panel widths, allowing wrapping when the viewport or enlarged fonts require it. Apply the shorter smoothing inputs in expanded views while keeping global controls unchanged.</p>
+<p>Encode Plotly trace identities using a stable, collision-free hexadecimal representation of the curve identity and trace role. Trace UIDs must contain only CSS-selector-safe characters because Plotly uses them in selectors during cleanup; keep user-facing names and legend-group identities independent. Cover repeated expansion, closing, reopening, regrouping, and redraws with the actual bundled Plotly in Chromium.</p>
+<p>After Load all values completes, make its result authoritative for that panel until selection, axes, or grouping invalidates it. Give each panel a render generation so an older asynchronous sampled calculation cannot replace a newer full result. Full-value traces disable Plotly's line simplification and keep every displayed point in both normal and expanded plots. Browser regressions use more than 20,000 known observations and verify actual trace lengths after loading, smoothing, expanding, and reopening.</p>
+<p>Mark a full-value panel complete only after Plotly finishes its redraw. Check rendered SVG geometry as well as input arrays, preserve every recorded step through redraw and expansion, and report redraw failures with a useful message and retry action that reuses the loaded observations. Omit unset axis ranges in Plotly.react layouts: a null range prevents Plotly from restoring indexed range properties and leaves its old SVG and calculation data visible. Use explicit range resets only for relayout commands. Preserve the latest requested state through the panel render generation.</p>
+<p>Maintain a separate real-browser suite using pinned Playwright/Chromium dependencies, the actual FastAPI server and native scalar reader, temporary synthetic event logs, and the bundled frontend assets. Run it explicitly in CI and on a normal host; fail on page errors, console errors, or application error toasts, and retain traces, screenshots, and logs on failure. Ordinary logic tests do not substitute for this suite. Missing browser dependencies must fail an explicit browser-test run rather than silently skipping it. Record sandbox execution limits separately from browser results.</p>
+<p>Expanded tag sections always contain their plots. Remove global plot pagination from All panels mode and automatically load off-screen plots as they approach the viewport, in bounded batches of at most 32 metric tags. Expanding a section requires no second Show these panels action. Clear loading or empty-state placeholders before initializing a purged plot, so revisiting a panel after cache eviction shows only the rendered chart. Preserve existing Plotly contents during ordinary redraws to retain zoom. Keep ordinary pagination for a custom panel subset, disconnect obsolete viewport observers, discard stale responses, and preserve panel smoothing when sections collapse and reopen.</p>
+<p>Cache member axis preparation between smoothing edits and use a browser worker for panels with at least 20,000 observations. Reuse worker observations across parameter changes, bound worker data to eight panels, and fall back to local calculation if workers are unavailable. Keep at most 32 retained panel datasets when viewport loading is active, evicting plots outside the viewport margin and automatically reloading them when revisited. Preserve explicit full-value results and expanded plots. Discard calculations superseded by a newer smoothing value.</p>
+<p>Add a saved Overview Ignore outliers in chart scaling checkbox, off by default. Match the installed TensorBoard scale implementation by trimming the bottom and top 5% of finite plotted Y values when choosing axis limits. Use log-transformed positive values for logarithmic panels. Keep all points, group calculations, exports, and analyses intact. Apply range changes to loaded charts and expanded panels without reloading curves, preserve X zoom, and retain the clipped range when resetting a chart. Fall back to the full finite extent when a very small sample has no central values, and pad constant ranges so they remain visible.</p>
+<p>Always load Overview curves from TensorBoard's fast native data provider and label retained samples and group statistics. Per-panel Load all values temporarily retains every scalar observation through a native reader and removes display sampling for that panel. Statistical analyses and raw exports continue to use unsampled observations. Discover tag names directly from the shared native provider and expose them while the initial scan continues.</p>
+<p>Time-series investigations analyze every scalar curve in the chosen experiment by default. Users may narrow the scope with case-sensitive glob inclusion and exclusion patterns, with exclusions taking precedence. Run analyses as background jobs with measured stage progress, cancellation, and bounded result reuse tied to event-file changes. Batch numerical frequency fits and correlations, limit plotting to browsable subsets, and retain every analyzed metric in results and exports.</p>
+<p>Show submission progress immediately after Analyze is clicked and prevent duplicate submissions. Retrieve results for jobs returned already complete, including cached requests. Keep submission, polling, calculation, and rendering failures visible in the Time series view with a retry action; transient polling failures must not silently stop progress. Use request generations to discard cancelled or superseded work. Updating a numeric setting must not replace the Analyze button during the input's blur event and swallow the pending click.</p>
+<p>Selection is shared across custom views. Filtering changes the visible run set; it must not silently replace an explicit selection. Show visible and selected counts separately, including selected runs hidden by filters. Archiving hides runs by default and is reversible. Do not infer training success, failure, or completion from file modification times; show when data was last updated.</p>
+<p>Allow named experiment filter sets containing multiple typed configuration predicates combined with AND. Preserve missing versus null and boolean versus numeric distinctions. Applying a named set changes the visible view; selecting its matches explicitly replaces the selection with unarchived matching experiments. Persist sets and the active view per log directory.</p>
+<p>Experiments includes a Clear all filters button that resets the search, configuration predicates, active named filter, and collection to All experiments. Preserve the selected experiments and saved filter definitions, and persist the cleared view. Each predicate can target either a configuration key or the experiment's relative log path, including Contains, Does not contain, and glob matching. Does not contain is the case-insensitive inverse of Contains, using a literal substring. Apply the same rule in browser previews, saved-filter match counts, view filtering, and server-side selection; persist it as not_contains in named filters and saved views. Keep existing all-conditions matching semantics.</p>
+<p>Place the Experiments Clear all filters button directly beside the shared Filters button, and disable it when no search, predicate, named filter, or collection restriction is active.</p>
+<p>Keep Filters, Clear all filters, and the named-filter selector and actions in one shared toolbar row. Keep experiment search and selection counts in their own row; allow the filter toolbar to wrap on narrow screens.</p>
+<p>Use compact experiment-selection rows with 3-pixel vertical cell padding, a tighter line height, and compact favorite buttons, checkboxes, and tags. Scope density rules to the experiment table, keep names readable, and continue honoring the user's font-size preference.</p>
+<p>Overview always uses the shared fast native reader. Each panel has a temporary Load all values action that starts a cancellable background native read retaining every observation; its progress and result apply only to that panel and current chart settings, and are never saved as a view preference. Configuration values render independently of scalar jobs. Latest scalar values reuse the shared native reader; smoothing and fixed-step summaries use full observations and reuse a bounded history cache while event files remain unchanged.</p>
+<p>Use one shared Overview legend above the curve plots, replacing individual plot legends and their panel-local visibility controls. Each experiment has a color swatch that opens a native color picker and a separate name button that toggles its curves across every panel, including uncertainty bands. Keep experiment selection and group membership independent of visibility. Provide one Show all curves button, mark hidden names visibly, and retain keyboard-accessible buttons and labeled color inputs. Grouped views list group curves once; configuration-group identities use their fields and typed labels rather than positional IDs. Save color overrides and hidden curves in the log directory's view, validate restored values, and apply them to pagination, redraws, late results, and full-value reads. Update loaded plots without fetching data or changing X zoom. Move the same shared legend into an expanded dialog and return it on close, with no duplicate legends. Keep each experiment's unified tooltip entry on one line, with its values and elapsed HH:MM:SS; put the shared axis position in the unified header. Elapsed time uses recorded wall timestamps and TensorBoard's indexed run-start metadata when available, falling back to the earliest loaded observation. Interpolate elapsed timestamps on the displayed grid without extrapolation and report mean elapsed time for grouped curves over the same contributing experiments. Keep hover formatting consistent across step, elapsed, wall-time, sampled, full-value, and expanded views.</p>
+<p>Keep the shared experiment legend visible while scrolling Overview by making its home wrapper sticky near the viewport top across the entire plot region. Keep the card opaque and above plot controls, bound the legend list by viewport height, and retain its internal scrolling for large selections. The same legend remains within the expanded dialog's fixed toolbar region and returns to its sticky home on close.</p>
+<p>Give Overview experiments 32 default colors with varied hues and lightness. Assign colors without ID-hash collisions across the complete selection, using stable experiment-path order so filtering and panel pagination do not change colors. Extend the palette with lighter and darker shades for larger selections. Apply the same assignment to shared legend swatches, lines, and uncertainty bands; preserve saved user overrides. Known groups receive separate assignments, and newly discovered configuration groups append colors without changing already loaded curves.</p>
+<p>Use one experiment-color lookup across Overview, selection chips, the Experiments table, and Relationships outcome dots. Prepare the shared default assignment before rendering any view, with selected experiments first in path order and remaining experiments afterward; saved custom experiment colors take precedence everywhere. Saved-group navigation and mean curves share group identities and colors. Categorical outcome plots retain category box summaries and draw experiment-colored scatter points over them, since Plotly box markers accept one color per trace. Keep encodings for metric identities and outcome magnitudes independent of experiment identity.</p>
+<p>Restore double-click behavior on shared legend names: isolate the chosen experiment or group across all Overview panels, including expanded views and bands; double-click again when it is the only visible curve to restore the others. Delay mouse single-click toggles briefly and cancel the pending toggle on double-click, while keyboard activation stays immediate. Track pending clicks independently per entry so rapid clicks on different names are not lost. Preserve the visibility state from the first click when deciding whether to restore all, and keep selection, colors, and loaded data unchanged.</p>
+<p>Format elapsed durations of at least a day as Dd HH:MM:SS, preserving HH:MM:SS for shorter durations and carrying rounded seconds into the next day. If a running server returns an older curve payload without original observations, identify that condition in the panel and explain that Expman needs a restart. With zero smoothing, the plotted values are also the original values; use that exact fallback. Never infer original observations from a smoothed or sampled curve.</p>
+<p>Overview tooltip entries show both Smoothed and Original values on the same line as the experiment name and elapsed time, including when smoothing is zero. Preserve the original observations before smoothing and align them to the displayed curve positions after sampling. For grouped curves, show the original member mean at each displayed position using the same contributors and interpolation boundaries as the plotted mean; label both values as means. Reuse the observations already loaded for the panel, including retained-sample and Load all values modes, without additional log reads. Expanded panels retain the same tooltip data and formatting.</p>
+<p>Relationships computes outcomes in a dedicated background queue with progress, cancellation, and persistent errors with Retry. Unrestricted final outcomes reuse the shared fast reader's latest observations; leave the exported first step empty when history was not loaded. Best, mean, fixed-step, and windowed outcomes use complete observations for the requested metric and a bounded history cache. Reuse results only while selected logs, configuration values, exclusions, names, and outcome settings match. Cancel superseded jobs and discard stale responses. Bound individual browser requests so a lost connection cannot leave an indefinite spinner; retrieve results even when a submitted job is already complete. Navigation and auto-refresh must not restart unchanged active work.</p>
+<p>Condition and outcome displays string categories without JSON quotation marks. Use explicit categorical positions and plain labels so numeric-looking strings remain categories. Retain typed grouping identities, escape chart markup while preserving literal quotation marks and apostrophes, and apply the same labels to parallel-coordinate categories. Dot tooltips in numeric and categorical condition plots show the experiment name and metric value, omitting the condition value.</p>
+<p>Overview plots selected experiments matching the experiment search and active filters. Match names, relative paths, tags, and configuration values without case sensitivity. Preserve the full selection while filtering; clearing the search restores its curves. Debounce typing, abort obsolete chart requests, and avoid metric rediscovery. Group means and temporary full-value reads use the same matching subset. Show matching-versus-total selected counts, provide a clear-filters action, and explain an empty result with an option to select matching experiments. Each panel reports coverage for the displayed subset and names experiments lacking curves. Distinguish indexing, absent scalars, an unrecorded metric, omission from saved groups, and lack of a common group overlap. Do not invent observations for empty logs; identical curves may overlap visually.</p>
+<p>Green difference highlighting applies only to configuration values. Scalar creation and editing offers None, Largest, or Smallest highlighting and a per-row color, defaulting to a customizable pink appearance preference. Highlight all finite numeric ties among the currently selected experiments, including the baseline; exclude missing and pending cells. Persist these row settings and apply color changes without rereading event files.</p>
+<p>Configuration path text remains selectable for copying. Only the adjacent grip is a draggable button; it retains keyboard reordering through Alt+Left/Right and accessible labels.</p>
+<p>Show configuration labels as the shortest unique suffix across configuration fields in the comparison, retaining full paths in hover tooltips. Preserve escaped path segments and file-qualified keys, and keep labels consistent across pages and text searches. Scalar columns likewise use the shortest unique metric suffix across all distinct scalar tags in the comparison, splitting slash-separated metric paths while preserving slashes inside parenthesized or bracketed units such as (m/s). Include enough parent segments to distinguish colliding names, including imported JSON metrics, and keep repeated summaries of the same metric consistently named. Scalar tooltips include the full metric, summary mode, step, smoothing, and highlight settings. Add vertical borders between comparison columns using the configured border color.</p>
+<p>Show each selected experiment as one row in the configuration difference table, with configuration paths and configured scalars as columns. The first experiment row is the baseline. Keep experiment names and values on one line; wrap configuration and scalar column names over multiple lines so names do not widen value columns. Size each field column from its longest displayed value, with compact minimums and a bounded width for very long values, retaining full values in tooltips. Keep the experiment-name column and multiline field headers pinned. Preserve typed difference highlighting down configuration columns and optional extrema highlighting down scalar columns.</p>
+<p>Keep Full names, reset widths, baseline selection, filtering, inclusion checkboxes, scalar editing/removal, and CSV export available in the transposed comparison. Put field controls in their multiline headers; drag grips reorder columns and Alt+Left/Right moves a focused field. Let users resize the experiment-name and field columns independently, persisting widths by stable field identity rather than experiment ID; disregard widths from the previous orientation. Show up to 50 field columns per page while keeping every selected experiment visible on each page. Keep both horizontal scrollbars synchronized and preserve scroll position across updates. Export one experiment per CSV row with full field specifications in the header.</p>
+<p>Use compact row heights in the configuration comparison: 3-pixel vertical cell padding, a tighter line height, and smaller inline drag, edit, and exclusion controls. Keep these density changes scoped to the comparison table and continue scaling text with the appearance settings.</p>
+<p>Provide a native horizontal scrollbar directly above the configuration table, synchronized with its existing bottom scrollbar. Keep its range aligned with the table's actual width after viewport, font, and manual column-size changes. Preserve horizontal and vertical positions during cached table updates. Pin the configuration/scalar header row while scrolling vertically, keep headers aligned with their columns while scrolling horizontally, and retain the pinned experiment-name column.</p>
+<p>Render missing configuration and scalar values as empty cells. Explicit configuration null remains visible as <code>null</code>; it still compares as distinct from a missing configuration. Keep the scalar loading indicator until reads finish, then leave cells without observations blank and exclude them from scalar extrema highlighting.</p>
+<p>Default custom-view text to black. Provide user-wide font family, font size, text, background, surface, accent, and border controls with presets and a preview. Apply appearance to charts as well as controls; native TensorBoard retains its own styling.</p>
+<p>Highlight configuration cells that differ from the baseline with a green background by default. Include a configurable difference color in Appearance, preview it live, and choose a readable text color for that background. Use a compact × button with a descriptive tooltip and accessible label to ignore a configuration path.</p>
+<p>Expose the same Baseline selector in Experiments and Configurations. Choosing a selected experiment places it first in the configuration comparison and recomputes cell highlights. Save the baseline with the workspace view; if it is no longer selected, use the first remaining selected experiment.</p>
+<p>Allow dragging configuration paths to reorder comparison rows. Persist the order by row identity across filtering, baseline changes, pagination, and reloads. Provide Reset path order and Alt+↑/↓ keyboard movement, including movement across page boundaries.</p>
+<p>Allow explicitly added TensorBoard scalar columns alongside configuration values. Each scalar field selects a metric and Latest, Latest smoothed, Value at step, or Smoothed value at step. Use the overview's exponential smoothing definition, with a per-field factor; interpolate requested steps only inside the recorded range and show missing data otherwise. Added scalar rows remain visible independently of the configuration-only differences toggle, use the same baseline highlights, and support editing, removal, and reordering. Save scalar row definitions with the workspace view.</p>
+<p>Render YAML comparisons first, independently of scalar reads. Load scalar comparison values in a background job with progress, reuse values when only the baseline or field order changes, and cancel obsolete work. Use a compact fixed-layout table with single-line, ellipsized headings and values, a bounded path column, and field columns as narrow as readable; use horizontal scrolling only when the viewport cannot accommodate those minimum widths.</p>
+<p>Provide loading, empty, partial-data, and error states. Preserve the user's view during refresh. Controls need accessible labels, keyboard navigation, readable contrast, and a responsive layout. Wide comparison tables may scroll horizontally.</p>
+<p>W&amp;B's <a href="https://docs.coreweave.com/products/wandb/app/features/panels/run-comparer">Run Comparer</a> informs the comparison workflow: shared run selection, configuration search, and a differences-only toggle. Its <a href="https://docs.coreweave.com/products/wandb/app/features/panels/parallel-coordinates">parallel coordinates</a> workflow informs exploration across several conditions and an outcome. These are interface references; Expman uses local event and YAML files.</p>
+<h2 id="discovery-and-ingestion">Discovery and ingestion</h2>
+<h3 id="experiment-identity">Experiment identity</h3>
+<p>An experiment is a configuration-bearing directory with one or more event streams beneath it. Prefer the nearest ancestor containing <code>config.yaml</code>, <code>config.yml</code>, or <code>.hydra/config.yaml</code>. If none exists, use a YAML-bearing ancestor; otherwise retain the event directory as an experiment with an explicit missing-configuration state.</p>
+<p>Use a stable workspace identifier plus the experiment's relative path for identity. Resolve directory aliases for duplicate detection, retain their display paths, and prevent symlink cycles. Prefer short <code>expNNN</code> aliases when several paths identify the same experiment. Follow configured log-root aliases even when their targets lie outside the root. Report broken or unreadable targets instead of silently treating them as empty runs.</p>
+<h3 id="event-handling">Event handling</h3>
+<ul>
+<li>Read both legacy scalar summaries and tensor-backed scalar summaries.</li>
+<li>Preserve step, value, and wall time; expose missing or non-finite values explicitly where relevant.</li>
+<li>Use TensorBoard-compatible restart handling. For duplicate surviving steps, retain the latest event and document the rule.</li>
+<li>Namespace metrics from distinct child streams so identical tags cannot overwrite each other.</li>
+<li>Detect changed files using file identity, size, and modification time; handle growth, replacement, truncation, and deletion.</li>
+<li>Keep malformed files and unreadable runs isolated so other experiments remain usable.</li>
+</ul>
+<p>Discovery should return metadata promptly. Read selected metrics lazily or through background indexing with visible progress. Avoid decoding image and other large tensor payloads during custom scalar ingestion. Use bounded caches with eviction; raw log volume must not imply unlimited process memory. Downsample chart responses while retaining endpoints and significant extrema. Compute summaries and analyses from unsampled values, and identify sampled visualizations.</p>
+<p>Run selected-experiment metric discovery in a separate background queue with indexing progress and elapsed time. Keep selection generations separate from view generations so navigation cannot discard valid discovery results. Cancel obsolete selection jobs. Fast discovery reads native metadata and the latest retained observation instead of parsing full histories in Python. Keep compatibility-reader summaries independently of raw-array eviction, validating them against event-file fingerprints. Latest scalar comparison rows reuse the shared native reader. Smoothing and fixed-step summaries use a bounded native history cache, keyed by selection and event fingerprints; color and highlight edits reuse computed values.</p>
+<p>Manual refresh is required; optional periodic refresh should coalesce requests and ignore stale responses. Native TensorBoard ingestion starts when needed so the app does not immediately read the dataset twice.</p>
+<p>Serve the native TensorBoard frontend before initial ingestion completes. Show indexing state, elapsed time, errors, and streams with data versus discovered streams. Make already ingested data available while remaining streams load, refresh the embedded view when initial indexing completes, and continue periodic ingestion for active logs.</p>
+<p>Default <code>--tensorboard-loader auto|fast|python</code> to <code>fast</code>, shared by Overview and native TensorBoard. Report native-reader startup failures. Explicit automatic and Python modes provide native TensorBoard compatibility; Overview requires the fast backend. Expose the reader and fallback reason. The fast reader streams data continuously; distinguish data availability from completion of its first load cycle. Full reads use <code>--samples-per-plugin=scalars=all</code> and <code>--reload=once</code>, waiting for the completed load-cycle signal described in <a href="https://github.com/tensorflow/tensorboard/blob/master/tensorboard/data/server/cli.rs">TensorBoard's native CLI source</a>. Close every owned child reader and clean up temporary paths on completion, cancellation, error, and shutdown.</p>
+<h2 id="configuration-semantics">Configuration semantics</h2>
+<p>Load YAML safely without executing Python objects or resolving Hydra expressions. Preserve interpolation strings and unresolved markers such as <code>???</code> literally. Show parse errors with the filename and retain access to the source text.</p>
+<p>Prefer <code>config.yaml</code>, then <code>config.yml</code>, then <code>.hydra/config.yaml</code> as the primary configuration. Expose other YAML files separately with file-qualified paths. A timestamped <code>hparams.yml</code> must not silently override the experiment's primary configuration. Record file and key provenance; make file inclusion or exclusion explicit.</p>
+<p>Flatten nested mappings for comparison, escaping literal dots and backslashes in keys. Preserve scalar types and compare lists structurally. Missing, explicit <code>null</code>, <code>false</code>, zero, and empty values must remain distinguishable. Configuration differences compare typed values, not rendered strings.</p>
+<p>Persist workspace-wide ignored key patterns, for example <code>timestamp</code>, <code>process_id</code>, <code>base_dir</code>, and <code>algo.config.tensorboard_dir</code>. Users choose which suggestions to apply. Support exact keys, subtrees, and documented glob patterns. Also support excluding noisy configuration files.</p>
+<p>Ignored conditions are hidden from differences, automatic grouping choices, and relationship rankings. They remain available in a clearly marked inspection mode and in the untouched source files. Restoring an exclusion should immediately update dependent views. Changing exclusions that affect an existing group must show the effect instead of silently redefining membership.</p>
+<p>Serialize exclusion saves and merge each row's ignore action with the latest acknowledged exclusion list. Failed saves must preserve previous exclusions and allow later clicks to proceed. Invalidate earlier comparison requests whenever exclusions change, discard stale responses, and apply current exclusions whenever cached comparison rows are rendered. Preserve the newest scalar results when refreshing configuration rows. Show ignored remains an explicit inspection mode. Revalidate application scripts and styles on page reload so new filter operators are not paired with cached older matchers.</p>
+<p>Use an inclusion checkbox with a black checkmark and border on a white background beside each configuration field: checked means included, and unchecked means ignored. Unchecking persists an exclusion; in Show ignored, checking an excluded field restores it directly without opening a dialog. Remove the matching path, subtree, glob, and source-filename exclusions that prevent inclusion, preserving unrelated rules and scalar rows. Explain in the control tooltip and exclusion editor that removing a matching rule also restores other configurations covered by it. Apply rapid toggles in order, refresh comparisons and grouping choices, and revert the displayed checkbox if saving fails. Keep Manage exclusions as a bulk pattern editor.</p>
+<h2 id="grouping-and-curve-mathematics">Grouping and curve mathematics</h2>
+<p>Support manual named groups and automatic grouping by one or more included configuration fields. Persist manual membership. Treat missing values as a distinct bucket. A run may belong to several named groups; disclose overlapping membership when groups are compared.</p>
+<p>For each metric:</p>
+<ol>
+<li>Select runs that contain the metric and disclose excluded members.</li>
+<li>Choose training step, elapsed time, or wall time as the horizontal axis.</li>
+<li>Apply TensorBoard's bias-corrected exponential smoothing to each run before interpolation and aggregation. Keep unsmoothed values available.</li>
+<li>Align observations on a shared grid using linear interpolation within each run's observed range.</li>
+<li>Compute the arithmetic mean across contributors at each grid position.</li>
+</ol>
+<p>Default to the common overlapping range so each point represents the same contributing runs. Offer a union-range mode with no extrapolation and a contributor count in tooltips. If ranges do not overlap, explain why no group mean is shown.</p>
+<p>Offer population standard deviation and min–max bands for descriptive spread. If standard error is offered, use sample standard deviation divided by the square root of the contributor count and require at least two contributors. Label bands explicitly; standard deviation is not a confidence interval. Smoothing and display sampling must not change stored metric summaries or analysis outcomes.</p>
+<p>This workflow draws on the idea of organizing related runs into <a href="https://docs.coreweave.com/products/wandb/runs/grouping">W&amp;B groups</a>, with alignment and aggregation rules made explicit for local logs.</p>
+<h2 id="condition-and-result-analysis">Condition and result analysis</h2>
+<p>When Include missing is enabled, merge absent and explicit null conditions into one (missing or null) category by default. Offer a Merge missing and null checkbox to split them into distinct groups when unchecked. Persist this preference per condition, include it in request/job identity, and apply it consistently to category labels, association groups, and parallel coordinates without changing original configuration values. Keep literal strings such as "null" and "(missing)" distinct from the merged category.</p>
+<p>Provide a per-condition type selector beside Condition and outcome: Automatic preserves inferred numeric/categorical typing; Categorical treats distinct numeric values as discrete groups. Add an independent Include missing as a category checkbox, off by default, that includes absent conditions as a distinct (missing) group with explicit null handled by the merge setting and literal strings kept distinct. Including missing values makes an otherwise numeric condition categorical when missing observations are present. Persist both overrides by configuration path per log directory and offer a return to Automatic and exclusion of missing values. Apply grouping consistently to condition plots, association ranking using the existing categorical correlation ratio, and parallel-coordinate typing; preserve the parallel plot's existing missing-position display. Preserve raw configuration types and outcome settings. Include overrides in background-job identity, reuse unchanged metric histories, and retain sample-size and categorical-cardinality safeguards. Group equal numeric values consistently (including 1 and 1.0) and order numeric categories numerically.</p>
+<p>Resolve a bare JSON metric filename inside every discovered experiment, using the same source namespace as the explicit {experiment}/filename form. A bare filename does not read a shared file at the log root. Apply identical resolution to configuration-source exclusions and loading progress. Populate JSON scalar and outcome choices directly from selected experiment summaries at startup, selection changes, and imports; their availability must not depend on TensorBoard discovery completing. Refresh metric choices in an open Add scalar dialog when new names arrive while preserving the current form values.</p>
+<p>Load additional JSON metrics on a separate background queue. Show an accessible progress bar immediately, then report completed source files, the current file, elapsed time, configuration discovery, and saving. Keep the form disabled during submission and polling, retain errors beside the source paths, and show the loaded counts when complete. Validate every source before replacing working registrations. Save paths in the log directory's .expman/state.json and restore them automatically on startup; default to {experiment}/evaluation_metrics.json for existing evaluation summaries. Reload changed files on refresh without importing metric values as configuration conditions.</p>
+<p>Additional JSON metrics are experiment summary values. Configure filenames per log directory, resolving each inside discovered experiment folders; support nested paths using the {experiment} placeholder. Accept direct numeric objects, a metrics object, or an evaluation record with experiment, status, and metrics fields. Bind records through their physical experiment folder, supporting historical aliases while rejecting conflicting known identities. Flatten nested finite numeric metrics into source-qualified JSON metric names; ignore missing, boolean, and nonnumeric leaves with diagnostics. Expose these values in experiment summaries, Latest scalar comparison rows, and Final-value Relationships outcomes. They have no invented steps or time histories and are excluded from curve panels and time-series analyses. Cache source parsing by file identity, retain native TensorBoard speed, invalidate summary jobs when imported values change, and persist registrations. Show unmatched records and malformed JSON clearly; reject invalid source changes without replacing working registrations.</p>
+<p>Read JSON configuration files with the standard JSON decoder and the same typed normalization, escaped paths, file provenance, exclusions, and 8 MiB limit as YAML. Discover experiment-root JSON files and timestamped hparams.json alongside existing YAML sources. Prefer config.yaml, config.yml, config.json, then Hydra configuration files; namespace secondary files by their relative filename instead of overwriting primary values. Keep malformed-source warnings and source text visible. Files explicitly registered as additional metric sources must be excluded from configuration discovery.</p>
+<p>Default the Relationships outcome metric to the first configured scalar field in Configurations, respecting field column order. Show the resolved metric in an Automatic option; permit an explicit metric choice and a return to Automatic. Immediately after Automatic, list the metrics used by configured scalar rows in their difference-table column order, followed by the remaining available metrics. List each metric once even when several summaries use it, and retain an explicit selection that is temporarily unavailable. Keep configured choices available while scalar discovery is pending. When no scalar row exists, use the workspace outcome metric or first discovered scalar. Persist explicit choices and update automatic defaults when scalar rows are added, removed, edited, or reordered.</p>
+<p>Automatic outcome summaries inherit the configured scalar's mode, target step, and exponential smoothing factor, including latest smoothed and smoothed value at step. If a metric is chosen explicitly, use its first configured scalar field when available. Match scalar-table mathematics exactly: smooth complete observations before interpolation or a step-window reduction, without extrapolation. Offer explicit summary choices and configurable step/smoothing overrides, persist these choices, include them in job cache keys, and reuse complete histories across summary and condition-scope changes.</p>
+<p>Link the numeric Spearman rank-correlation and categorical correlation-ratio labels to their respective Wikipedia explanations, opening these references separately from the workspace.</p>
+<p>Default association ranking to configuration paths displayed in Configurations for the selected experiments, applying its differences-only setting and path search across all table pages. Provide an All configs scope that ranks every non-excluded configuration path. Continue honoring global path and YAML exclusions in both scopes, omit scalar comparison rows, and disclose the number of eligible paths. Persist the scope and configuration filters, and compute eligible paths from current YAML values even when Configurations has not been opened. Scope changes must invalidate cached association results without rereading unchanged metric histories.</p>
+<p>The user selects a metric, an outcome definition, and whether smaller or larger values are preferable. Support final value, best value, mean over a step window, and value at a specified step. Report the evaluation horizon so experiments with unequal training budgets are not presented as directly comparable without context.</p>
+<p>For numeric conditions, show a scatter plot with run identities, sample count, Pearson correlation, and Spearman rank correlation. For categorical conditions, show per-value distributions, means, spread, and counts; report an association measure such as eta squared. Exclude missing values by default, report exclusions, and include missing/null categories when requested. Constant conditions have no estimable correlation. Treat high-cardinality identifiers separately from useful categorical conditions.</p>
+<p>Rank numeric conditions by absolute Spearman correlation and categorical conditions by a clearly labeled association statistic. Keep their different meanings visible. The ranking is descriptive: it does not establish causality, account for every confounder, or replace a controlled experiment. W&amp;B distinguishes <a href="https://docs.coreweave.com/products/wandb/app/features/panels/parameter-importance">correlation and predictive importance</a>; Expman's initial ranking must not call correlation model-based importance.</p>
+<p>Parallel coordinates display configurable conditions plus the outcome, with one colored line per experiment with an outcome. Keep experiments missing a chosen condition visible: use a labeled missing position below numeric values or a separate categorical tick, preserving explicit null as distinct from missing. Explain this convention beside the plot, show coverage for each chosen condition, and offer a reset to useful varying conditions. Default conditions favor coverage and variation; keep an explicitly empty choice empty. Shorten axis labels to unique path suffixes and list full paths in Dimensions. Brushing filters the plotted experiment identities, including missing positions, and resets when chart data changes; adopting it as the workspace selection requires an explicit action. Handle axis reordering, disjoint brush intervals, and clearing ranges without retaining stale selections. Keep empty results and rendering failures visible with a retry action. Export the underlying analysis table for reproducibility.</p>
+<h2 id="correlated-events-within-an-experiment">Correlated events within an experiment</h2>
+<p>Enable period-aware event scoring by default, with a saved Account for periodic fluctuation switch. Infer candidate periods efficiently from robustly clipped, detrended observations using FFT autocorrelation on sufficiently regular contiguous data; require at least 60 observations and six observed cycles, a correlation of at least 0.55, and phase predictions that reduce clipped squared error by at least 50% against the cycle-scale trend and 25% against nearby-observation prediction. Remove a local trend over two cycles before validating and fitting continuous phase residuals, so warm-up trends do not dominate cycle discovery. Prefer the shortest period within 5% of the best validated correlation/error-reduction score. Validate the expected phase value without using the tested observation or its cycle. For continuous curves, compare with the local same-phase median across neighboring cycles and include normal cycle-to-cycle amplitude and timing variability in the noise scale. For binary curves, estimate a smoothed probability from recorded observations at the same phase, keeping the long binary context and excluding the tested observation. Preserve original timestamps and the existing score threshold, reject unreliable cycles, respect logging gaps, retain isolated extreme anomalies, and disclose the inferred period and adjustment coverage. Periodicity analysis must still use unadjusted event times for repeated-event intervals. Keep curve processing bounded and report progress.</p>
+<p>Select one experiment and two or more scalar metrics. Investigate whether an event in one curve precedes, coincides with, or follows an event in another. For example, inspect whether a gradient-norm spike occurs before a loss spike and whether reward drops afterward.</p>
+<p>Provide a shared time window and a choice of training step, elapsed time, or wall time. Preserve original observation times for event detection. Never infer an ordering finer than the logging resolution. Step alignment is appropriate only when metrics use comparable step counters; wall time can help when counters differ, but does not correct asynchronous logging delays.</p>
+<p>Start with a reproducible robust detector: subtract a centered rolling median, estimate noise using median absolute deviation, and flag excursions beyond a configurable threshold. Offer spike/dip detection on levels and abrupt-change detection on first differences. Expose the window size, threshold, polarity, minimum event separation, and handling of flat signals. Merge neighboring excursions into events with start, peak, and end positions. Detection is retrospective; a centered baseline uses surrounding observations and is not an online prediction.</p>
+<p>Show normalized curves for visual comparison while retaining original values and units in tooltips. Overlay event markers and provide a common chronological timeline and event table. Selecting an event should focus a surrounding interval and reveal nearby events on the other curves. Include the detected event's raw value, baseline, deviation, score, observation time, and metric name.</p>
+<p>Keep each curve and event-marker entry in the aligned chart's unified tooltip on one line. Show the common position once in the shared header, with inline original values and scores.</p>
+<p>Keep aligned-chart event tooltips compact: show only the event type, original value, and score beside the metric name. Leave detection windows, score-method explanations, inferred periods, and boundary adjustments in settings and detailed results.</p>
+<p>Label Threshold as an absolute event-score cutoff. Show the applied threshold from the returned analysis settings. Explain that the plotted display z-score uses the displayed curve's mean and standard deviation, while event scoring uses median/MAD for continuous data and a smoothed Bernoulli model for binary data. Event-marker tooltips show the original value, detection score, context, and display z-score so users can check the cutoff directly.</p>
+<p>For continuous scores near an analysis boundary, account for uncertainty from the incomplete centered context. Use the robust spread of the nearest available observations, excluding the tested observation, as a lower bound on the score's noise scale. Include ordinary startup variation instead of comparing it only with later steady-state noise. Do not discard early steps wholesale: an isolated extreme observation must remain detectable. Apply the same safeguard to local and periodic-phase baselines and disclose that the noise scale includes boundary variation.</p>
+<p>Compute local MAD from the original observations in each context window relative to that window's own median. Do not substitute the median of residuals from different neighboring baselines: it can collapse on smooth trends and produce huge scores at gentle turning points. Retain a numerical floor and the global residual noise bound, and continue to score periodic curves against their matched-phase variation.</p>
+<p>Accept any finite event threshold of at least 1, including 50, without an arbitrary upper cap. Order event rows and CSV exports by descending absolute event score so strong dips and spikes receive equal priority; use time to break ties. Browse metrics by their strongest detected event, then event count and metric name. Keep timeline chart positions chronological and label the table's ordering explicitly.</p>
+<p>Classify curves containing only exact 0/1 observations as binary before differencing. Give them an independent context window of 1,001 observations by default, configurable from 31 to 100,001 and saved with the analysis settings. Estimate the local probability of 1 from actual neighboring observations, excluding the observation being tested: <code>p = (neighboring ones + 0.5) / (neighbor count + 1)</code>. Score the observation as <code>(value − p) / sqrt(p × (1 − p))</code>. This smoothed Bernoulli score stays finite for constant or rare states and requires no artificial MAD floor. Use cumulative sums for linear-time context computation and clip windows at the available history, without duplicating boundary values. Change mode considers actual transitions and preserves the existing logging-gap guard. Continuous-valued curves retain their median/MAD score and window. Expose each score's method and context in results, tooltips, and exports; label the mixed column Event score and apply the requested threshold to its absolute value. Use the same binary context for repeated-event intervals in periodicity analysis.</p>
+<p>For continuous curves, compute rolling medians and MAD scales from the available observations at the start and end of the log. Do not repeat the first or last value to manufacture a full window. Interior windows retain the existing median/MAD calculations; genuine boundary outliers remain eligible for detection.</p>
+<p>Use two complementary timing analyses:</p>
+<ul>
+<li><strong>Event matching:</strong> match events across a chosen reference metric and another metric within a configurable tolerance, without reusing an event in the same pair. Report individual signed delays, matched counts, unmatched counts, and delay distributions. Positive delay means the other metric's event follows the reference event. A configurable matching rule must not silently pair distant or ambiguous events.</li>
+<li><strong>Lagged correlation:</strong> resample only the common observed range onto a uniform grid and compare correlation over a bounded lag window. Offer first differences to reduce shared-trend effects. Show the correlation-versus-lag curve, zero-lag correlation, strongest observed lag, overlap count, and grid resolution. Positive lag means the other metric follows the reference metric. Do not extrapolate beyond observed data or present interpolated timing precision as measured precision.</li>
+</ul>
+<p>Handle sparse or constant signals, missing intervals, different sampling cadences, and too-short overlaps explicitly. Bound the number of detected events and disclose truncation. Restrict interpretation to temporal association: autocorrelation, shared causes, multiple lag searches, and logging delays can create apparent relationships. Export the event table and analysis settings so the investigation can be repeated.</p>
+<h2 id="periodic-behavior-discovery-and-analysis">Periodic behavior discovery and analysis</h2>
+<p>Investigate recurring oscillations and repeated anomalies within a selected experiment and time window. Periods use the selected axis units: training steps or elapsed seconds. Keep the original observation timestamps and display the sampling cadence, covered duration, and number of observable cycles.</p>
+<p>Provide three complementary views:</p>
+<ul>
+<li><strong>Spectrum:</strong> rank candidate periods with a sinusoidal-fit spectrum that supports uneven observation times. Fit a floating offset and remove or jointly fit a linear trend. For regularly sampled data, a conventional periodogram is also appropriate. Show frequency or period, relative explained variation, amplitude, and frequency resolution. Relative spectral power is a descriptive score, not a calibrated probability that a cycle is real.</li>
+<li><strong>Autocorrelation:</strong> show similarity at increasing delays, with valid-pair counts and candidate repeating lags. For irregular data, disclose any resampling grid and mask substantial gaps rather than interpolating through them silently. Compare autocorrelation peaks with spectral peaks to distinguish a plausible fundamental period from its harmonics.</li>
+<li><strong>Repeated events:</strong> use detected spike or change times to show inter-event intervals, their distribution, median spacing, and variability. An apparently regular event interval can support a periodicity hypothesis but must not be treated as independent confirmation when derived from the same curve.</li>
+</ul>
+<p>Allow users to set the period search range, detrending, and analysis window. Bound frequencies using the observed cadence and duration; require enough observations and at least two observable cycles, and flag estimates supported by only a few cycles. Detect local spectral peaks instead of returning adjacent bins as separate discoveries. Show harmonics and competing candidate periods rather than presenting only one winning estimate.</p>
+<p>For a chosen candidate period, fit each selected curve at that common period and compare phase and amplitude. Express phase offset as an equivalent signed delay, with a positive value meaning the other metric lags the reference. Phase delays are modulo one period and do not establish a unique event order or a causal relationship. Compare phase only when both curves have adequate observations and a meaningful fitted component at that period.</p>
+<p>Use moving analysis windows to inspect whether a cycle persists, drifts, or occurs only during part of training. Show the window length and minimum-cycle requirement. A compact window-by-period heatmap can expose transient oscillations that a whole-run spectrum hides.</p>
+<p>Handle flat signals, monotonic trends, sparse logs, long gaps, irregular sampling, isolated spikes, and too-short windows explicitly. Flag aliasing risk, limited resolution, shared periodic logging schedules, and sensitivity to the chosen time window. Sampling or computational limits must be visible, and exports must include timestamps, detrending, search bounds, and analysis settings.</p>
+<p>The <a href="https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.lombscargle.html">generalized Lomb–Scargle reference</a> describes sinusoidal fitting with uneven timestamps and a floating mean; the <a href="https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.periodogram.html">periodogram reference</a> provides the regularly sampled counterpart.</p>
+<h2 id="persistence-and-data-access">Persistence and data access</h2>
+<p>Keep log-directory-specific annotations, named groups, named filter sets, exclusions, selected runs, collapsed panel prefixes, chart views, and time-series settings in <code>&lt;logdir&gt;/.expman/state.json</code>. Store user-wide appearance and automatic-refresh preferences in <code>~/.expman/settings.json</code>. Use <code>--state-file</code> to override the workspace file and <code>--user-data-dir</code> or <code>EXPMAN_HOME</code> to override the user directory. Use atomic writes and synchronization for a single application process. Scope preferences and identifiers to the log root so switching datasets does not mix workspaces. Keep disposable caches separate from durable metadata.</p>
+<p>On first use of a missing default workspace file, copy only the matching workspace from the previous working-directory <code>.expman/state.json</code> or user-directory <code>state.json</code>. Preserve the source as a backup and never replace an existing destination. Import earlier browser view preferences into workspace state after a successful server save.</p>
+<p>Treat TensorBoard event files and source YAML as read-only; save workspace metadata in the dedicated <code>.expman</code> directory. Renaming and archiving affect app metadata, not experiment paths. Never delete logs or rewrite source YAML. Use safe rendering for names, notes, tags, and config values. Bind to <code>127.0.0.1</code> by default; remote access should use SSH forwarding or a deliberate authenticated deployment. Do not expose an arbitrary file-read endpoint.</p>
+<p>Export raw scalar CSV, comparison or analysis tables, chart images, and workspace metadata. Exports should identify metrics, units, aggregation settings, and exclusions. Raw exports retain unsmoothed values.</p>
+<h2 id="api-outline">API outline</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /api/workspace</code></td>
+<td>Workspace identity, data source, preferences, and discovery warnings.</td>
+</tr>
+<tr>
+<td><code>GET /api/experiments</code></td>
+<td>Run metadata and available summaries, with filtering and pagination.</td>
+</tr>
+<tr>
+<td><code>GET/PATCH /api/experiments/{id}</code></td>
+<td>Inspect a run or update its annotations.</td>
+</tr>
+<tr>
+<td><code>POST /api/refresh</code></td>
+<td>Rescan and schedule incremental reads; expose progress for long work.</td>
+</tr>
+<tr>
+<td><code>POST /api/metrics</code></td>
+<td>Discover available scalar tags for selected runs.</td>
+</tr>
+<tr>
+<td><code>POST /api/curves</code></td>
+<td>Fetch selected individual or aggregated curves with explicit settings.</td>
+</tr>
+<tr>
+<td><code>POST /api/compare</code></td>
+<td>Return typed configuration cells and difference flags.</td>
+</tr>
+<tr>
+<td><code>PUT /api/ignored-configs</code></td>
+<td>Update reversible key and file exclusions.</td>
+</tr>
+<tr>
+<td><code>POST/PUT/DELETE /api/groups</code></td>
+<td>Manage named groups; updates and deletion address a group ID.</td>
+</tr>
+<tr>
+<td><code>POST /api/analysis</code></td>
+<td>Compute outcomes, association statistics, and chart records.</td>
+</tr>
+<tr>
+<td><code>POST /api/events</code></td>
+<td>Detect events within an experiment and return chronological events, event matches, and lagged correlations.</td>
+</tr>
+<tr>
+<td><code>POST /api/periodicity</code></td>
+<td>Return candidate periods, spectral and autocorrelation data, repeated-event intervals, phase comparisons, and optional windowed analysis.</td>
+</tr>
+<tr><td><code>POST /api/analysis/jobs</code></td><td>Start an events or periodicity job, defaulting to all scalar curves with optional inclusion/exclusion globs. Return a job ID immediately.</td></tr>
+<tr><td><code>GET /api/analysis/jobs/{id}</code><br><code>GET .../{id}/result</code><br><code>POST .../{id}/cancel</code></td><td>Read progress separately from results, retrieve completed output, or cancel queued/running work.</td></tr>
+<tr><td><code>GET/POST/PUT/DELETE /api/filters</code><br><code>POST /api/filters/{id}/matches</code></td><td>Manage named filter sets and resolve current matching experiment IDs; updates and deletion address a set ID.</td></tr>
+<tr><td><code>PUT /api/settings</code><br><code>PUT /api/view</code><br><code>GET /api/tensorboard/status</code></td><td>Save global appearance/preferences or workspace view state, and inspect native indexing progress.</td></tr>
+<tr>
+<td><code>GET /api/export/...</code></td>
+<td>Export raw data, comparisons, analyses, or metadata.</td>
+</tr>
+</tbody>
+</table></div>
+<p>Validate identifiers, bounds, outcome definitions, and group membership on the server. Include warnings and provenance in responses. Unknown IDs must produce a useful error, and a failed metadata update must preserve the previous state.</p>
+<h2 id="development-and-operation">Development and operation</h2>
+<p>The intended normal startup is:</p>
+<pre><code class="language-bash">uv sync --locked
+uv run expman serve --logdir /data/weixu/log/holomotion
+</code></pre>
+<p>The default URL is <code>http://127.0.0.1:8000</code>. Provide <code>--host</code>, <code>--port</code>, and <code>--state-file</code> options. A deterministic <code>uv run expman demo</code> command should generate real event files and YAML in a separate example directory for testing. It must not write into the HoloMotion dataset.</p>
+<p>Commit a portable <code>uv.lock</code> with registry dependencies, not machine-specific cache or wheel paths. Use a development dependency group for pytest, HTTP API tests, and Ruff. The wheel must contain all frontend assets. Document <code>uv run pytest</code>, Ruff checks, and <code>uv build</code>; verify installation from the built wheel outside the checkout.</p>
+<h2 id="validation-and-acceptance">Validation and acceptance</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Required evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Ingestion</td>
+<td>Fixtures with legacy and tensor scalars, nested streams, resumed runs, invalid files, growing files, and directory aliases.</td>
+</tr>
+<tr>
+<td>Configurations</td>
+<td>Tests for multiple files, safe parsing, literal expressions, missing versus null, typed equality, escaped keys, exclusions, and restoration.</td>
+</tr>
+<tr>
+<td>Groups</td>
+<td>Hand-calculated results for unequal steps, interpolation, disjoint ranges, missing metrics, smoothing, and variability bands.</td>
+</tr>
+<tr>
+<td>Analysis</td>
+<td>Known positive and negative relationships, ties, constant fields, categories, incomplete data, and unequal evaluation horizons.</td>
+</tr>
+<tr>
+<td>Correlated events</td>
+<td>Known delayed spikes and dips, abrupt changes, flat signals, irregular timestamps, unmatched events, sign conventions, and lag-resolution limits.</td>
+</tr>
+<tr>
+<td>Periodic behavior</td>
+<td>Known sinusoids, multiple frequencies, harmonics, periodic spikes, trends, noise, uneven timestamps, gaps, phase offsets, and changing periods.</td>
+</tr>
+<tr>
+<td>Persistence</td>
+<td>Annotation and group round trips, concurrent writes, restart behavior, failed writes, and workspace separation.</td>
+</tr>
+<tr>
+<td>Native TensorBoard</td>
+<td>Successful prefixed frontend assets and scalar, image, histogram, text, and other representative plugin endpoints.</td>
+</tr>
+<tr>
+<td>Browser workflows</td>
+<td>Select runs, edit annotations, compare and ignore fields, restore exclusions, create groups, inspect analysis, refresh, and export.</td>
+</tr>
+<tr>
+<td>Real dataset</td>
+<td>Start against HoloMotion, inspect <code>exp081</code>, compare multiple configs, verify a group mean independently, and exercise relationship plots.</td>
+</tr>
+<tr>
+<td>Packaging</td>
+<td>Locked uv setup, passing tests and lint, built wheel installation, and frontend access from the installed package.</td>
+</tr>
+</tbody>
+</table></div>
+<p>Record real-data load time, response sizes, and peak memory before selecting default cache and sampling limits. Keep responsiveness checks separate from numerical correctness checks. The app is complete only when the browser workflows and native TensorBoard integration work against real logs, not solely when API fixtures pass.</p>
+<h3 id="verification-status">Verification status · 2026-11-13</h3>
+<p>Compact panel controls were inspected in Chromium at panel widths of 320, 483, 643, and 1,304px. All controls remain on one line without overflow, including loading progress and the completed full-value label at the 320px minimum. The numeric field displays 0.999 in its 50px width, and expanded views use the same shorter smoothing inputs. Small panels use a 40px slider; wider and expanded panels use 56px. Keyboard-accessible names and the expansion tooltip remain available.</p>
+<p>The complete suite now passes 171 tests with no skips, including six real Chromium workflows and native TensorBoard binary/RPC integration. Playwright 1.65.1, pytest-playwright 0.10.0, and Chromium 158 were downloaded through individually approved execution outside the ordinary sandbox. The ordinary sandbox still denies sockets. The browser suite in <code>tests/ui/</code> exercises the real local server, native scalar reader, and bundled Plotly using isolated synthetic logs and state. Scenarios cover repeated expansion and grouping, smoothing without curve requests, shared legend isolation and saved colors, off-screen section loading, Experiments/Configurations/Relationships/Time-series navigation, categorical condition labels, and 20,050 full-value observations. Browser errors, console errors, failed HTTP responses, and application error toasts fail tests; failures retain traces and screenshots. GitHub Actions is configured to run the complete backend and browser suite, and README.md records the commands and temporary cache paths used here.</p>
+<p>Real Chromium reproduced a Plotly redraw failure: an explicit null axis range caused the string exception “container is not an object,” leaving a retained-sample SVG visible while the input arrays already held all observations. Omitting unset ranges fixes both full-value and smoothing redraws. The completion label now waits for a successful redraw; a failed redraw reports the error and retries from the loaded observations without rereading logs. Browser checks assert every calculated step and SVG vertex after full loading, smoothing, and repeated expansion. JavaScript regressions also cover string exceptions, truthful completion and cached retries, CSS-safe unique trace UIDs, preservation of full-value vertices, and out-of-order worker completions.</p>
+<p>The backend, numerical, and frontend logic checks cover the following behavior.
+Python checks exercise real event files, plugin payloads, configuration semantics, persistence, groups, filters, continuous and binary event scoring, phase-aware periodic baselines with cycle variation and warm-up detrending, long binary contexts, observed-only boundary windows, startup uncertainty without excluding genuine early extremes, thresholds above 30, shared fast-reader loading, bounded history reuse, fast background Relationships outcomes, cancellation, configuration responsiveness during scalar jobs, automatic loader fallback, and child-reader cleanup. JSON checks cover typed configuration discovery, summary formats, source exclusion from conditions, blank pending values, import progress, failed-source preservation, persisted paths and restart, changed-file invalidation, bare filenames that read experiment files while ignoring log-root files, and summary-only jobs that forbid history loading. JavaScript checks exercise rendering and interactions with a simulated DOM and Plotly interface, including actual API responses, cached analysis completion, request deadlines, error recovery, stale cancellation, unquoted string categories with explicit categorical axes, inherited scalar summary settings, filtered association scopes, missing-value axes, full-path display preferences, and column resizing, binary-context controls, compact score tooltips, JSON scalar and outcome selection before TensorBoard indexing completes, preserved selections in open scalar dialogs, loading progress and disabled duplicate submission, and saved outlier-resistant scaling on ordinary and expanded linear/log charts without reloading data. These checks establish data and rendering logic; they do not establish browser layout or real Plotly interaction behavior.</p>
+<p>Overview frontend checks cover a single shared legend with no individual plot legends, global name toggles, native color-input updates, matching line/band colors, hidden-name indicators, Show all curves, and preserved experiment selection without fetching curves. Double-click regressions exercise mouse click/click/double-click sequences, delayed single clicks, restoration after an expired first-click timer, and rapid independent name clicks. Color checks compare Overview, selection chips, Experiments, and numeric/categorical Relationships dots, including saved overrides. They verify saved color/visibility preferences, invalid saved-value filtering, redraws, pagination, stable configuration-group identities, late full-value results, zoom preservation, and moving the same legend into expanded plots and back. Tooltip checks verify one-line Smoothed and Original values, clear diagnostics for older server responses, an exact zero-smoothing fallback, day-prefixed durations, rounding across midnight, and signed times. Numerical checks independently verify original values and unsmoothed timestamps on step, elapsed, and wall-time axes, zero smoothing, group contributor means without extrapolation, empty overlap, duplicate steps, downsampling, full-value reads, and indexed run starts without loading unrelated scalar histories. The real Chromium workflows additionally verify shared legend behavior, saved colors, smoothing, expansion, and full-value Plotly SVG rendering. Operating-system color-picker interaction and exhaustive responsive layout checks remain outside that coverage.</p>
+<p>Browser smoothing matches backend calculations in 36 real API cases spanning three axes, zero/nonzero weights, three band types, and overlap/union ranges. Independent weighted-average checks cover TensorBoard debiasing, constants, non-finite values, duplicate positions, original values, retained spikes, and full histories. Worker checks cover reused observations, bounded cache eviction, and error messages. UI checks verify independent panel controls, explicit global application including hidden panels, expanded controls, preserved full-value jobs and original values, and no curve requests during smoothing changes. Section checks verify all expanded plot cards, automatic viewport loading, 32-panel cache eviction and automatic revisiting, observer cleanup, and retained panel settings. Timing with Node 12 on synthetic 26×2,000-point curves was about 38 ms for a warmed individual-curve calculation and 462 ms for an unusually dense, misaligned group; large calculations use a browser worker. These are calculation measurements, not browser-rendering latency measurements.</p>
+<p>Read-only validation against /data/weixu/log/holomotion, using temporary app state, matched 76 experiments and imported 240 numeric values from 40 per-experiment evaluation_metrics.json files with no errors or warnings. A background reload took about 3.4 seconds and exposed progress updates. Success-rate comparison cells matched the original JSON documents, including blank pending exp068 values; Relationships produced 40 outcomes without treating metrics as conditions or loading TensorBoard histories. The corrected within-window MAD calculation also removed the two artificial exp068 mean_noise_std events caused by collapsing noise estimates.</p>
+<p>Repeating that validation with a temporary copy of the actual saved workspace confirmed that its evaluation_metrics.json registration now resolves per experiment. Six of its 25 selected experiments provide values, exposing six JSON metric names immediately from experiment summaries. The original workspace state and log files were left unchanged.</p>
+<p>Exclusion regression checks reproduce and prevent lost updates from rapid ignore clicks, stale comparison responses restoring ignored paths, stale scalar results replacing newer values, and failed saves blocking later changes. Current exclusions also hide rows from older comparison snapshots; Show ignored still exposes them for inspection. Application scripts retain ETag-based conditional responses with explicit no-cache headers. A read-only replay of the saved vlawc path filters (exp* plus Does not contain tensorboard) returned 121 matches in both Python and the current browser matcher from 149 discovered experiments; the scripts loaded in the user's browser were not directly inspected.</p>
+<p>Additional frontend checks cover synchronized top and bottom horizontal scrolling, scroll-position preservation across table updates, scroll range updates after resizing, hidden scrollbars when columns fit, and resize-observer cleanup. Inclusion-checkbox checks ignore and restore rows without a dialog, remove matching path and filename rules (including namespaces and globs), preserve unrelated exclusions and scalar values, and restore the previous checkbox state after a failed save. Sticky header behavior is implemented in the configuration table's CSS; actual browser layout remains unverified in this environment.</p>
+<p>Transposed comparison checks cover 61 selected experiment rows across 55 configuration/scalar fields, retaining every experiment on both field pages. They verify baseline row ordering, differences and scalar extrema down columns, blank missing values versus explicit null, multiline names independent of value-sized widths, field-specific saved widths, horizontal drag and keyboard reordering, inclusion toggles, synchronized scrolling, and one-experiment-per-row CSV export. Widths from the earlier orientation are discarded. Actual browser layout remains unverified.</p>
+<p>Condition-grouping checks cover per-path Automatic/Categorical selection, optional missing categories, default missing/null merging and explicit separation, literal-string distinctions, matching box-plot and parallel-axis groups, preference round trips, changed background-job identities, and categorical correlation ratios checked against grouped sums of squares. Changing grouping reuses loaded outcomes; tests reject additional history reads. UI logic is tested with the simulated DOM and Plotly interface; categorical axis labels and actual condition/parallel charts also pass in Chromium. Optional missing/null grouping controls remain covered by logic tests.</p>
+<div class="table-wrap"><table><thead><tr><th>Requirement</th><th>Current evidence</th></tr></thead><tbody>
+<tr><td>Experiment management and YAML comparison</td><td>API and JavaScript workflow tests cover selected runs, renamed runs, differences, nested filename exclusions, restoration, typed values, and stable mapping comparisons.</td></tr>
+<tr><td>Grouped curves and condition analysis</td><td>Numerical tests cover group interpolation and bands, numeric and categorical associations, and tied ranks. JavaScript checks cover saved-group plotting, scatter/box charts, parallel-coordinate data, and explicit brushing. A real HoloMotion group mean matches independent NumPy interpolation.</td></tr>
+<tr><td>Startup and boundary uncertainty</td><td>Tests cover ordinary startup variation with windows of 31 and 101 observations, both with and without periodic scoring, while preserving isolated 10⁸-valued anomalies near both boundaries. In saved exp078 settings, the three detections peaking at step 1 disappear after including nearby variation; the −3.67×10¹⁰ joint_pos_limits event at step 822 remains. Aligned-chart tooltip entries use inline fields with one shared position header.</td></tr>
+<tr><td>Period-aware spike analysis</td><td>Tests cover regular pulse trains, normal cycle variation, warm-up trends, anomalous peaks and off-phase spikes, binary phase probabilities with long contexts, logging gaps, unreliable periods, unadjusted periodicity intervals, job reuse, and saved UI settings. Replaying saved exp078 settings reduced Action_Rate from 92 to 3 events, MPKPE_Waist from 103 to 3, and contact accuracy from 21 to 3. The joint_pos_limits anomaly at step 822 remains detected at approximately −3.67×10¹⁰. Scoring all 85 curves in both local and period-aware modes took 1.79 seconds after loading; this does not measure browser or event-file loading latency.</td></tr>
+<tr><td>Configuration-driven Relationships defaults</td><td>Tests match association paths to the configuration table's differences and search filters, including empty scopes and exclusions. All four configured scalar modes match Relationships values, with step interpolation and exponential smoothing verified independently. Frontend checks cover scalar row order, explicit overrides, automatic defaults, Wiki links, typed missing positions, disjoint/reordered brushes, rendering errors, and clear/reset controls.</td></tr>
+<tr><td>Comparison display preferences</td><td>Frontend and storage checks cover blank scalar cells, the Full names toggle without data reloads, independent column resizing by pointer and keyboard, pointer cancellation, deferred scalar updates during dragging, persisted widths, and reset to automatic layout. Browser layout remains unverified.</td></tr>
+<tr><td>Relationships responsiveness and category labels</td><td>API tests verify background outcomes against full-history calculations for final, best, mean, and fixed-step summaries, configuration/name/exclusion invalidation, and cancellation while YAML comparison remains responsive. Provider tests forbid Python log reads, check shared-index final values, and confirm full-history reuse across other summaries. JavaScript checks cover visible errors, Retry, request deadlines, cached completion, navigation, selection changes, and stale replies. String labels preserve literal quotes and apostrophes without JSON wrappers; numeric-looking strings remain distinct categories. Chromium additionally verifies categorical labels and actual condition/parallel charts.</td></tr>
+<tr><td>TensorBoard functionality</td><td>Prefixed frontend/assets and actual scalar, image, histogram, text, audio, graph, and projector endpoints pass fixture checks. Fast-reader integration through TensorBoard's data-provider interface is checked using a local provider; the native binary/RPC integration test now passes through approved execution with sockets available. Real HoloMotion native HTML and scalar data are accessible during Python indexing. A full Python-loader check reached its 20-minute observation limit with data in 102 of 152 streams; complete indexing was not established. The directory has 76 experiments, 152 event streams, and about 2.05 GiB of unique event files. Browser plugin rendering remains unverified.</td></tr>
+<tr><td>Additional requested controls</td><td>Tests cover all-panel pagination and nested prefix collapse, panel sizing, per-panel logarithmic axes, expanded-panel zoom/scale/cleanup, temporary full-value reads, saved view migration, filter clearing, path-based named filters, immediate select-all checkbox updates, baseline selection, removal of stale comparison columns, selectable paths, plain string values, empty missing cells, path reordering by drag and keyboard, optional scalar extrema highlights, global appearance, time-series patterns, event timing, periodicity, progress, cancellation, and reuse.</td></tr>
+<tr><td>Real-data acceptance</td><td>An in-process run discovered 76 experiments and compared exp079–exp081: 286 scalar tags, 1,662 configuration keys, 383 differences, and 1,550 independently verified group-mean points. This check took 30.46 seconds with 380.5 MiB peak process memory. This was an ASGI check, not a listening web server.</td></tr>
+<tr><td>Configuration responsiveness</td><td>A current YAML-only comparison of 25 selected HoloMotion experiments returned 35 difference rows in 0.24 seconds, with scalar-history reads forbidden. A controlled background-history test confirms YAML comparison remains available while scalar computation is blocked. Native full-value reads now pass in the synthetic Chromium workflow; performance against the complete real log tree remains outside that check.</td></tr>
+<tr><td>Selected experiment coverage</td><td>A scan of the saved 25-experiment HoloMotion selection found no scalar observations in exp026, exp027, exp030, exp031, and exp045 after reading their complete event files. Prefix reads confirmed the actor-learning-rate and mean-reward tags in the other 20; those reads do not establish every tag's availability. Synthetic provider and UI checks verify that all 25 selected IDs are requested, all 20 available curves are retained, independent step ranges are preserved, and missing metrics, empty logs, indexing, and empty group overlap are disclosed.</td></tr>
+<tr><td>Real-data event scores</td><td>The former binary/MAD and endpoint-padding behavior produced misleading scores in HoloMotion logs. With a 1,001-observation binary context, kl_stop_triggered now scores 0.462 at exp068 step 10 and 0.177 at exp078 step 9, instead of about 1e9. Removing boundary padding changes exp078 MPKPE_Waist at step 1 from 54.74 to 0.777. The genuine joint_pos_limits dip at step 822 is retained, with value approximately −3.67×10¹⁰ and robust score −4.43×10¹². Metrics and event rows are ordered by their strongest absolute event score.</td></tr>
+<tr><td>Packaging</td><td>The uv lock is consistent with the manifest. A fresh temporary environment installed every exact locked dependency and passed all 171 backend and Chromium checks. Wheel and source distributions include the original Apache 2.0 license, repository URLs, frontend assets, and HTML design. Installed-wheel checks outside the checkout also pass.</td></tr>
+</tbody></table></div>
+<p><strong>Remaining manual coverage:</strong> the passing Chromium suite uses synthetic logs and temporary workspace state. Exhaustive responsive layout checks, interaction with the operating system’s native color picker, all native TensorBoard plugin screens, and every workflow against the complete real log directory remain outside this suite. Earlier socket and Firefox execution failures were resolved for Chromium testing through individually approved command execution; they do not invalidate the browser results above.</p>
+<h2 id="implementation-sequence">Implementation sequence</h2>
+<p>Earlier Firefox attempts failed on process capabilities and runtime libraries. Chromium testing subsequently succeeded through individually approved execution, using installed Playwright tooling and temporary caches. The verification record above reports the current real-browser results separately from the earlier simulated checks.</p>
+<ol>
+<li>Establish this design and reconcile the preliminary scaffold with its requirements.</li>
+<li>Implement discovery, configuration semantics, and event ingestion with deterministic tests.</li>
+<li>Implement workspace persistence, group mathematics, outcomes, and analysis APIs with numerical tests.</li>
+<li>Build and validate the experiment, curve, configuration, relationship, and event interfaces.</li>
+<li>Integrate and validate native TensorBoard, refresh, and exports.</li>
+<li>Run HoloMotion acceptance checks, measure resource usage, and verify uv packaging and documentation.</li>
+</ol>
+    </article>
+    <footer class="document-footer"><span>Expman · Technical design</span><span>Self-contained document · Print or save as PDF from your browser</span></footer>
+  </main>
+</body>
+</html>
