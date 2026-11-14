@@ -16,6 +16,13 @@ def test_all_panels_are_accessible_and_page_requests_are_bounded():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node is optional for frontend tests")
+def test_combined_metric_scaling_and_preferences():
+    script = Path(__file__).with_name("test_combined.cjs")
+    result = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node is optional for frontend tests")
 def test_browser_smoothing_matches_tensorboard_and_backend_groups(client, tmp_path):
     identifiers = [run["id"] for run in client.get("/api/experiments").json()["experiments"][:3]]
     cases = []

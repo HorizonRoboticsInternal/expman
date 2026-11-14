@@ -1,6 +1,7 @@
 """Discover experiments and read real TensorBoard scalar summaries lazily."""
 
 import hashlib
+import json
 import math
 import os
 import threading
@@ -53,6 +54,7 @@ class ExperimentRepository:
         self.max_cached_points = 2_000_000
         self.warnings = []
         self.last_scan = 0
+        self.revision = ""
         self.json_metric_files = set()
         self.json_sources = JSONMetrics(self.root)
 
@@ -60,6 +62,7 @@ class ExperimentRepository:
         with self.lock:
             self.json_metric_files = self.json_sources.files()
             discovered, warnings, visited = {}, [], set()
+            sources = []
 
             def walk_error(error):
                 warnings.append(str(error))
@@ -117,6 +120,7 @@ class ExperimentRepository:
                 ).hexdigest()[:16]
                 if experiment_id not in discovered:
                     config, files, problems = load_configs(experiment_path, self.json_metric_files)
+                    sources.append(("experiment", relative, files, problems))
                     discovered[experiment_id] = Experiment(
                         id=experiment_id,
                         path=experiment_path,
@@ -129,13 +133,34 @@ class ExperimentRepository:
                 experiment.run_dirs.append(path)
                 for event_file in event_files:
                     try:
-                        experiment.modified = max(experiment.modified, event_file.stat().st_mtime)
+                        status = event_file.stat()
+                        sources.append(
+                            (
+                                "events",
+                                str(event_file),
+                                status.st_ino,
+                                status.st_mtime_ns,
+                                status.st_size,
+                            )
+                        )
+                        experiment.modified = max(experiment.modified, status.st_mtime)
                     except OSError as error:
                         experiment.warnings.append(str(error))
             self.experiments = dict(
                 sorted(discovered.items(), key=lambda pair: pair[1].relative_path)
             )
             self.warnings = warnings
+            for path in self.json_metric_files:
+                try:
+                    status = path.stat()
+                    sources.append(
+                        ("json", str(path), status.st_ino, status.st_mtime_ns, status.st_size)
+                    )
+                except OSError:
+                    continue
+            self.revision = hashlib.sha256(
+                json.dumps(sorted(sources, key=lambda item: (item[0], item[1]))).encode()
+            ).hexdigest()
             self.last_scan = time.time()
             self.cache = OrderedDict(
                 (key, value) for key, value in self.cache.items() if key in discovered

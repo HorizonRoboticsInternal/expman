@@ -21,6 +21,17 @@ STRESS_POINTS = 20_050
 def build_ui_app(root, scenario="basic"):
     logdir = root / "logs"
     generate_demo(logdir, count=4)
+    if scenario == "refresh":
+        for index in range(9):
+            (logdir / f"broken-{index}").symlink_to(root / f"missing-{index}")
+    if scenario == "combined-indexing":
+        for path in (logdir / "exp000").glob("events.out.tfevents.*"):
+            path.unlink()
+        EventFileWriter(str(logdir / "exp000")).close()
+    if scenario == "annotations":
+        (logdir / "exp000" / "evaluation_metrics.json").write_text(
+            json.dumps({"metrics": {"score": 0.95}})
+        )
     if scenario in {"stress", "sections"}:
         writer = EventFileWriter(str(logdir / "exp000"))
         try:
@@ -28,6 +39,15 @@ def build_ui_app(root, scenario="basic"):
             for step in range(count):
                 values = (
                     [summary_pb2.Summary.Value(tag="stress/loss", simple_value=step % 100 / 100)]
+                    + (
+                        [
+                            summary_pb2.Summary.Value(
+                                tag="stress/reward", simple_value=1000 + step % 97 * 2
+                            )
+                        ]
+                        if step % 2 == 0
+                        else []
+                    )
                     if scenario == "stress"
                     else [
                         summary_pb2.Summary.Value(
@@ -47,6 +67,17 @@ def build_ui_app(root, scenario="basic"):
             writer.close()
     app = create_app(logdir, root / "state.json", root / "user", tensorboard_loader="fast")
     identifiers = [item.id for item in app.state.repository.scan()]
+    if scenario == "combined-indexing":
+        gate = threading.Event()
+        app.state.ui_metadata_gate = gate
+        app.state.metadata_jobs.executor.submit(gate.wait, 30)
+        start_fast = app.state.tensorboard._start_fast
+
+        def start_with_short_reload(board):
+            board.flags.reload_interval = 1
+            return start_fast(board)
+
+        app.state.tensorboard._start_fast = start_with_short_reload
     view = {
         "selected": identifiers[:1] if scenario == "stress" else identifiers,
         "panels": ["stress/loss"] if scenario == "stress" else ["train/loss", "eval/reward"],
@@ -66,6 +97,15 @@ def build_ui_app(root, scenario="basic"):
         {"id": "control", "name": "Control / variant: α", "experiment_ids": identifiers[:2]},
         {"id": "other", "name": "Other group", "experiment_ids": identifiers[2:]},
     ]
+    if scenario == "combined-indexing":
+        view["combinedPlot"] = {
+            "experiment": identifiers[0],
+            "tags": ["train/loss", "eval/reward"],
+            "scale": "standard",
+            "smoothing": 0.9,
+        }
+    if scenario == "refresh":
+        view["selectionMode"] = "filters"
     app.state.store.update(lambda state: state.update(view=view, groups=groups))
     return app
 
@@ -93,6 +133,7 @@ def browser_type_launch_args(browser_type_launch_args, browser_name):
 def ui_server(tmp_path, request):
     scenario = request.node.get_closest_marker("ui_scenario")
     app = build_ui_app(tmp_path, scenario.args[0] if scenario else "basic")
+    request.node.expman_ui_app = app
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(128)
@@ -108,6 +149,8 @@ def ui_server(tmp_path, request):
             time.sleep(0.05)
         yield f"http://127.0.0.1:{port}"
     finally:
+        if hasattr(app.state, "ui_metadata_gate"):
+            app.state.ui_metadata_gate.set()
         server.should_exit = True
         thread.join(timeout=15)
         listener.close()
@@ -155,7 +198,10 @@ def ui_page(page, ui_server, request):
     )
     try:
         page.goto(ui_server)
-        wait_for_overview(page)
+        if hasattr(request.node.expman_ui_app.state, "ui_metadata_gate"):
+            page.wait_for_selector("#combined-chart")
+        else:
+            wait_for_overview(page)
         yield page
     finally:
         if errors or application_errors or responses:

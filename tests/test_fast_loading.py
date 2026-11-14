@@ -328,7 +328,8 @@ def test_full_history_cache_reuses_modes_and_invalidates_changed_events(client, 
     assert len(native_reads) == 2
 
 
-def test_load_all_panel_keeps_every_observation_and_releases_reader(client, monkeypatch):
+@pytest.mark.parametrize("tags", [["dense"], ["dense", "sparse"]])
+def test_load_all_panel_keeps_every_observation_and_releases_reader(client, monkeypatch, tags):
     lifecycle = []
 
     class Reader:
@@ -350,7 +351,14 @@ def test_load_all_panel_keeps_every_observation_and_releases_reader(client, monk
             return {
                 "dense": np.column_stack(
                     (np.arange(2505), np.sin(np.arange(2505)), np.arange(2505) + 1000)
-                )
+                ),
+                "sparse": np.column_stack(
+                    (
+                        np.arange(0, 2505, 2),
+                        np.cos(np.arange(0, 2505, 2)),
+                        np.arange(0, 2505, 2) + 1000,
+                    )
+                ),
             }
 
     monkeypatch.setattr("expman.jobs.FullScalarReader", Reader)
@@ -360,7 +368,7 @@ def test_load_all_panel_keeps_every_observation_and_releases_reader(client, monk
         "/api/curves/all/jobs",
         json={
             "experiment_ids": [identifier],
-            "tags": ["dense"],
+            "tags": tags,
             "source": "tensorboard",
             "smoothing": 0.8,
         },
@@ -373,4 +381,15 @@ def test_load_all_panel_keeps_every_observation_and_releases_reader(client, monk
     assert curve["y"][1] == pytest.approx(np.sin(1) / 1.8)
     assert not curve["sampled"]
     assert result["source"] == "all-values"
+    if "sparse" in tags:
+        sparse = result["curves"]["sparse"][0]
+        assert sparse["x"] == list(range(0, 2505, 2))
+        np.testing.assert_allclose(sparse["original_y"], np.cos(np.arange(0, 2505, 2)))
+        identifiers = [
+            item["id"] for item in client.get("/api/experiments").json()["experiments"][:2]
+        ]
+        rejected = client.post(
+            "/api/curves/all/jobs", json={"experiment_ids": identifiers, "tags": tags}
+        )
+        assert rejected.status_code == 400
     assert lifecycle == ["start", "close"]

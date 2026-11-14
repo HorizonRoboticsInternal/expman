@@ -23,6 +23,7 @@ class StateStore:
                 "json_metrics": ["{experiment}/evaluation_metrics.json"],
                 "groups": [],
                 "named_filters": [],
+                "named_views": [],
                 "experiments": {},
                 "view": {},
             }

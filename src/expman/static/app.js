@@ -2,6 +2,7 @@
 
 (() => {
   const palette = ["#5475e8", "#e8a45c", "#36a18d", "#a181d6", "#da8196", "#65a8d6", "#a0af5a", "#bf906b"];
+  const annotationFields = ["name", "tags", "notes", "starred", "archived"];
   const tabs = {
     overview: ["Overview", "Follow training curves and compare experiments at a glance.", "M3 3h7v7H3zm11 0h7v7h-7zM3 14h7v7H3zm11 0h7v7h-7z"],
     runs: ["Experiments", "Find the runs that matter. Keep their context close.", "M4 5h16M4 12h16M4 19h16"],
@@ -11,9 +12,12 @@
     native: ["TensorBoard", "The native TensorBoard interface, with all available logging plugins.", "M5 3h14v18H5zM8 8h8m-8 4h8m-8 4h5"]
   };
   const state = {
-    workspace: null, runs: [], selected: new Set(), tab: "overview", collection: "all", query: "", filters: [], activeFilter: "",
+    workspace: null, runs: [], selected: new Set(), pendingStars: new Set(), tab: "overview", collection: "all", query: "", filters: [], activeFilter: "",
+    activeNamedView: "", selectionMode: "manual", namedViewBusy: false, namedViewLoading: false,
     tags: [], summaryTags: [], jsonMetricLoading: false, jsonMetricJob: null, jsonMetricProgress: null, keys: [], panels: [], showAllPanels: false, panelQuery: "", panelPage: 0, panelPageSize: 16, collapsedPanelGroups: [],
     panelSize: "medium", logYPanels: [], visiblePanelTags: [], expandedPanel: null,
+    combinedPlot: null, combinedData: null, combinedFull: null, combinedRenderGeneration: 0,
+    combinedDragMode: false, combinedDrag: null, combinedFitting: false,
     panelSmoothing: {}, panelData: new Map(), smoothingRedraw: null, overviewObserver: null,
     panelRenderGeneration: new Map(),
     overviewLoaded: new Set(),
@@ -83,7 +87,10 @@
       const response = await fetch(path, Object.assign(body === undefined ? {} : {method: method || "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)}, signal ? {signal} : {}));
       const value = await response.json();
       if (!response.ok) {
-        const error = new Error(typeof value.detail === "string" ? value.detail : JSON.stringify(value.detail || value));
+        let message = typeof value.detail === "string" ? value.detail : JSON.stringify(value.detail || value);
+        if (response.status === 404 && path.startsWith("/api/named-views")) message = "Restart Expman and refresh this page to enable named views.";
+        if (message === "Select experiments and one panel to load all values") message = "Restart Expman and refresh this page to load all values for combined metrics.";
+        const error = new Error(message);
         error.status = response.status; throw error;
       }
       return value;
@@ -93,13 +100,16 @@
     }
   }
 
-  function remember() {
-    if (!state.workspace) return;
+  function viewSnapshot() {
     const snapshot = {selected: ids(), panels: state.panels, showAllPanels: state.showAllPanels,
+      namedView: state.activeNamedView, selectionMode: state.selectionMode,
+      configurationExclusions: {patterns: (state.workspace.state || {}).ignored_configs || [], files: (state.workspace.state || {}).ignored_files || []},
+      sort: state.sort, showIgnored: state.showIgnored, condition: state.condition, analysisWindow: state.analysisWindow || {},
       panelQuery: state.panelQuery, panelPage: state.panelPage, panelPageSize: state.panelPageSize,
       collapsedPanelGroups: state.collapsedPanelGroups,
       panelSize: state.panelSize, logYPanels: state.logYPanels,
       panelSmoothing: state.panelSmoothing,
+      combinedPlot: state.combinedPlot,
       overviewColors: state.overviewColors, hiddenOverviewCurves: state.hiddenOverviewCurves,
       configOrder: state.configOrder, configScalars: state.configScalars,
       configFullNames: state.configFullNames, configColumnWidths: state.configColumnWidths,
@@ -110,6 +120,13 @@
       parallelKeys: state.parallelKeys, filters: state.filters, activeFilter: state.activeFilter,
       query: state.query, collection: state.collection,
       time: Object.fromEntries(Object.entries(state.time).filter(([key]) => !["tags", "available", "loadedExperiment"].includes(key)))};
+    return snapshot;
+  }
+
+  function remember() {
+    if (!state.workspace || state.namedViewLoading) return;
+    const snapshot = viewSnapshot();
+    renderNamedViewControls();
     const serialized = JSON.stringify(snapshot);
     if (serialized === state.savedView && !state.pendingView) return;
     state.pendingView = JSON.parse(serialized);
@@ -129,13 +146,107 @@
   function setAutoRefresh(enabled) {
     window.clearInterval(state.autoTimer);
     byId("auto-refresh").checked = enabled;
-    state.autoTimer = enabled ? window.setInterval(() => execute(refresh), 30000) : null;
+    state.autoTimer = enabled || state.selectionMode === "filters" ? window.setInterval(() => execute(() => refresh(true)), 30000) : null;
   }
 
-  function mergeRuns(runs) {
+  function renderNamedViewControls() {
+    if (!state.workspace) return;
+    const views = (state.workspace.state || {}).named_views || [];
+    const active = views.find(view => view.id === state.activeNamedView);
+    const dirty = active && window.ExpmanViews.signature(viewSnapshot()) !== window.ExpmanViews.signature(active.view);
+    byId("named-view-choice").innerHTML = option("", "Working copy", state.activeNamedView) + views.map(view => option(view.id, view.name, state.activeNamedView)).join("");
+    byId("named-view-choice").disabled = state.namedViewBusy;
+    byId("named-view-status").textContent = state.namedViewBusy ? "Saving or loading…" : active ? dirty ? "Modified" : "Saved" : "Working copy";
+    byId("update-named-view").disabled = !active || !dirty || state.namedViewBusy;
+    byId("revert-named-view").disabled = !active || !dirty || state.namedViewBusy;
+    for (const id of ["rename-named-view", "delete-named-view"]) byId(id).disabled = !active || state.namedViewBusy;
+    byId("new-named-view").disabled = state.namedViewBusy;
+    byId("selection-mode").value = state.selectionMode;
+    byId("selection-mode").disabled = state.namedViewBusy;
+    byId("selection-mode-note").textContent = state.selectionMode === "filters" ? "Following filters · rescans every 30s" : "Explicit experiment selection";
+  }
+
+  async function flushWorkingView() {
+    window.clearTimeout(state.saveViewTimer);
+    if (state.saveViewChain) await state.saveViewChain;
+    const view = viewSnapshot();
+    await api("/api/view", {view}, "PUT");
+    state.pendingView = null; state.savedView = JSON.stringify(view); state.workspace.state.view = view;
+    window.clearTimeout(state.saveViewTimer);
+  }
+
+  async function loadNamedView(identifier) {
+    if (state.namedViewBusy) return;
+    if (!identifier) { state.activeNamedView = ""; remember(); return; }
+    state.namedViewBusy = true; renderNamedViewControls();
+    let loaded = false;
+    try {
+      await flushWorkingView();
+      state.namedViewLoading = true;
+      await api("/api/named-views/" + identifier + "/load", {});
+      state.pendingView = null; window.clearTimeout(state.saveViewTimer);
+      loaded = true; window.location.reload();
+    } finally {
+      if (!loaded) { state.namedViewLoading = false; state.namedViewBusy = false; renderNamedViewControls(); }
+    }
+  }
+
+  function namedViewDialog(rename = false) {
+    const active = (state.workspace.state.named_views || []).find(view => view.id === state.activeNamedView);
+    if (rename && !active) return;
+    dialog(rename ? "Rename named view" : "Save as new view", `<p>Save settings across all workspace pages. Edits stay in the working copy until Update view. Loading another view replaces the working copy.</p><label class="field">View name<input name="view_name" required maxlength="120" value="${escape(rename ? active.name : "")}"></label>`, rename ? "rename-view" : "new-view");
+  }
+
+  async function writeNamedView(name, identifier, rename = false) {
+    if (state.namedViewBusy) return;
+    state.namedViewBusy = true; renderNamedViewControls();
+    try {
+      await flushWorkingView();
+      const saved = await api("/api/named-views" + (identifier ? "/" + identifier : ""), {name, ...(!rename ? {view: viewSnapshot()} : {})}, identifier ? "PUT" : "POST");
+      state.workspace.state.named_views = (state.workspace.state.named_views || []).filter(view => view.id !== saved.id).concat(saved);
+      if (!rename) state.activeNamedView = saved.id;
+      byId("dialog").close(); remember();
+      notify(rename ? "View renamed" : "Named view saved");
+    } finally { state.namedViewBusy = false; renderNamedViewControls(); }
+  }
+
+  async function deleteNamedView() {
+    if (!state.activeNamedView || state.namedViewBusy) return;
+    state.namedViewBusy = true; renderNamedViewControls();
+    try {
+      await flushWorkingView();
+      state.workspace.state.named_views = await api("/api/named-views/" + state.activeNamedView, {}, "DELETE");
+      state.activeNamedView = ""; remember(); notify("Named view deleted; current settings retained");
+    } finally { state.namedViewBusy = false; renderNamedViewControls(); }
+  }
+
+  function followFilterSelection() {
+    if (state.selectionMode !== "filters") return false;
+    const matching = visibleRuns().map(run => run.id);
+    const changed = matching.length !== state.selected.size || matching.some(id => !state.selected.has(id));
+    if (changed) state.selected = new Set(matching);
+    return changed;
+  }
+
+  function manualSelection() {
+    if (state.selectionMode === "manual") return;
+    state.selectionMode = "manual"; setAutoRefresh(state.workspace.settings.auto_refresh);
+  }
+
+  function mergeRuns(runs, preserveAnnotations = false) {
     const merged = new Map(state.runs.map(item => [item.id, item]));
-    runs.forEach(item => { item.searchText = (item.name + " " + item.path + " " + item.tags.join(" ") + " " + JSON.stringify(item.config)).toLowerCase(); merged.set(item.id, item); });
+    runs.forEach(item => {
+      const current = merged.get(item.id);
+      if (current && preserveAnnotations) item = {...item, ...Object.fromEntries(annotationFields.map(key => [key, current[key]]))};
+      item.searchText = (item.name + " " + item.path + " " + item.tags.join(" ") + " " + JSON.stringify(item.config)).toLowerCase();
+      merged.set(item.id, item);
+    });
     state.runs = Array.from(merged.values());
+  }
+
+  function mergeRunAnnotations(item) {
+    const current = state.runs.find(run => run.id === item.id);
+    mergeRuns([current ? {...current, ...Object.fromEntries(annotationFields.map(key => [key, item[key]]))} : item]);
   }
 
   function prepareExperimentColors() {
@@ -173,6 +284,7 @@
   }
 
   function renderChrome() {
+    renderNamedViewControls();
     prepareExperimentColors();
     const visible = visibleRuns(), selected = state.runs.filter(item => state.selected.has(item.id));
     const metadata = state.workspace.state;
@@ -196,7 +308,10 @@
       const count = state.runs.filter(item => !item.archived && window.ExpmanFilters.matches(item.config, saved.filters, item.path)).length;
       return option(saved.id, `${saved.name} (${count} matches)`, state.activeFilter);
     }).join("");
-    for (const identifier of ["apply-named-filter", "select-named-filter", "edit-named-filter"]) byId(identifier).disabled = !named.some(saved => saved.id === state.activeFilter);
+    for (const identifier of ["select-named-filter", "edit-named-filter"]) byId(identifier).disabled = !named.some(saved => saved.id === state.activeFilter);
+    const outside = byId("outside-filter-selection");
+    outside.hidden = state.tab !== "runs" || !hidden;
+    outside.textContent = hidden ? `${hidden} additional ${hidden === 1 ? "experiment is" : "experiments are"} selected outside the current filters (${state.selected.size} selected in total).` : "";
     byId("selection-chips").innerHTML = selected.slice(0, 10).map(item => `<span class="chip"><span class="color-dot" style="background:${experimentColor(item.id)}"></span>${escape(item.name)}<button data-action="unselect" data-value="${item.id}" aria-label="Deselect ${escape(item.name)}">×</button></span>`).join("") + (selected.length > 10 ? `<button class="text-button" data-action="tab" data-value="runs">+${selected.length - 10} more</button>` : "");
     byId("stats").innerHTML = [["Experiments", state.runs.length, `${visible.length} visible in this collection`, "▦"], ["Selected runs", selected.length, "Shared across comparison views", "◈"], ["Scalar metrics", state.tags.length, "Available in selected experiments", "⌁"], ["Saved groups", metadata.groups.length, `${metadata.ignored_configs.length + metadata.ignored_files.length} configuration exclusions`, "◫"]].map(([title, value, foot, symbol]) => `<div class="stat"><div class="stat-head">${title}<span class="stat-icon">${symbol}</span></div><div class="stat-value">${number(value)}</div><div class="stat-foot">${escape(foot)}</div></div>`).join("");
   }
@@ -258,7 +373,7 @@
       const result = await api("/api/metrics/jobs/" + identifier + "/result");
       if (requestId !== state.selectionRequest) return;
       state.metricsLoading = false; state.metricsJob = null; state.metricsError = "";
-      mergeRuns(result.experiments);
+      mergeRuns(result.experiments, true);
       state.tags = result.tags; state.summaryTags = result.summary_tags || []; state.keys = result.config_keys; chooseDefaults();
       refreshScalarMetricOptions();
       if (state.options.group === "config" && state.options.groupKeys.some(key => !state.keys.includes(key))) {
@@ -374,8 +489,10 @@
   async function applyGlobalSmoothing() {
     const tags = Array.from(new Set(state.tags.concat(state.panels, Object.keys(state.panelSmoothing))));
     state.panelSmoothing = Object.fromEntries(tags.map(tag => [tag, state.options.smoothing]));
+    if (state.combinedPlot) state.combinedPlot.smoothing = state.options.smoothing;
     updateSmoothingControls(); remember();
     await redrawSmoothing(state.visiblePanelTags);
+    if (state.combinedPlot && byId("combined-chart")) await renderCombined(state.serial);
   }
 
   function trimPanelData(current) {
@@ -610,11 +727,307 @@
     state.expandedPanel = null;
   });
 
+  function combinedTags(identifier) {
+    const run = state.runs.find(item => item.id === identifier);
+    const available = run ? Object.keys(run.metrics).filter(tag => state.tags.includes(tag)) : [];
+    return (available.length ? available : state.tags).slice().sort();
+  }
+
+  function combinedChoices(identifier, selected) {
+    return combinedTags(identifier).map(tag => `<label data-choice="${escape(tag.toLowerCase())}"><input type="checkbox" name="choices" value="${escape(tag)}" ${selected.includes(tag) ? "checked" : ""}>${escape(tag)}</label>`).join("");
+  }
+
+  function combinedDialog() {
+    const runs = overviewRuns(), saved = state.combinedPlot;
+    const experiment = saved && runs.some(item => item.id === saved.experiment) ? saved.experiment : runs[0] && runs[0].id;
+    if (!experiment) { notify("Select an experiment to combine its metrics."); return; }
+    const tags = saved && saved.experiment === experiment ? saved.tags : state.panels.filter(tag => combinedTags(experiment).includes(tag)).slice(0, 2);
+    dialog(saved ? "Edit combined metrics" : "Combine metrics", `<p>Overlay up to 32 metrics from one experiment. Independent 0–1 scaling makes different magnitudes comparable; hover retains original and smoothed values.</p><label class="field">Experiment<select name="combined_experiment">${runs.map(item => option(item.id, item.name, experiment)).join("")}</select></label><label class="field">Scaling<select name="combined_scale">${combinedScaleOptions(saved ? saved.scale : "minmax")}</select></label><label class="field">Find metrics<input type="search" id="choice-search" placeholder="Filter metric tags…"></label><div class="check-list">${combinedChoices(experiment, tags)}</div>`, "combined", "", "Show plot");
+  }
+
+  function combinedScaleOptions(selected) {
+    return [["minmax", "Independent ranges · 0–1"], ["standard", "Standard scores · mean 0, SD 1"], ["raw", "Original units · shared Y axis"]].map(([key, name]) => option(key, name, selected)).join("");
+  }
+
+  function combinedOffset(spec, tag) {
+    const value = spec.offsets && spec.offsets[spec.scale] && spec.offsets[spec.scale][tag];
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  function combinedAxisLabel(spec) {
+    const label = spec.scale === "minmax" ? "Each metric scaled to 0–1" : spec.scale === "standard" ? "Standard score · each metric's mean and SD" : "Original units · shared axis";
+    return label + (spec.tags.some(tag => combinedOffset(spec, tag)) ? " + display offsets" : "");
+  }
+
+  const combinedHover = offset => "%{fullData.name}: Smoothed %{customdata[0]:.6g} · Original %{customdata[1]:.6g} · Elapsed %{customdata[2]}" + (offset ? " · Display offset " + number(offset) : "") + "<extra></extra>";
+
+  async function fitCombinedY() {
+    const target = byId("combined-chart"), axis = target && target._fullLayout && target._fullLayout.xaxis;
+    if (!target || !target.data || !axis) return;
+    if (state.combinedFitting) return;
+    state.combinedFitting = true;
+    const button = byId("combined-fit-y");
+    button.disabled = true; button.textContent = "Fitting…";
+    try {
+      const crop = axis.range.slice(), bounds = crop.map(value => axis.r2l(value));
+      const visibility = new Map(target.data.map(trace => [trace.meta.metric, trace.visible === false || trace.visible === "legendonly" ? trace.visible : true]));
+      if (!window.ExpmanCombined.visibleYRange(target.data, bounds, value => axis.d2l(value))) { notify("No visible curve values in this time interval."); return; }
+      state.combinedPlot.scale = "minmax";
+      const coordinates = state.options.x_axis === "wall" ? bounds.map(value => new Date(new Date(value).toISOString().slice(0, -1)).getTime()) : bounds;
+      state.combinedPlot.scaleWindow = {axis: state.options.x_axis, start: Math.min(...coordinates), end: Math.max(...coordinates)};
+      byId("combined-scale").value = "minmax";
+      await renderCombined(state.serial, crop);
+      await Plotly.restyle(target, {visible: target.data.map(trace => visibility.get(trace.meta.metric))});
+      const currentAxis = target._fullLayout.xaxis;
+      const range = window.ExpmanCombined.visibleYRange(target.data, currentAxis.range.map(value => currentAxis.r2l(value)), value => currentAxis.d2l(value));
+      if (range) await Plotly.relayout(target, {"yaxis.range": range, "yaxis.autorange": false});
+      remember();
+    } finally {
+      state.combinedFitting = false;
+      if (byId("combined-fit-y")) { byId("combined-fit-y").textContent = "Fit Y to view"; updateCombinedInteractionControls(byId("combined-chart")); }
+    }
+  }
+
+  function updateCombinedInteractionControls(target) {
+    const toggle = byId("combined-drag-toggle"), reset = byId("combined-reset-offsets"), fit = byId("combined-fit-y");
+    const ready = target && target.data && target.data.length;
+    if (toggle) { toggle.disabled = !ready; toggle.setAttribute("aria-pressed", String(state.combinedDragMode)); toggle.classList.toggle("primary", state.combinedDragMode); }
+    if (fit) fit.disabled = !ready || state.combinedFitting;
+    if (reset) reset.disabled = !state.combinedPlot || !state.combinedPlot.tags.some(tag => combinedOffset(state.combinedPlot, tag));
+    if (target) target.classList.toggle("move-curves", state.combinedDragMode);
+    const hint = byId("combined-move-hint");
+    if (hint) hint.hidden = !state.combinedDragMode;
+  }
+
+  function cancelCombinedDrag() {
+    const drag = state.combinedDrag;
+    if (!drag) return;
+    state.combinedDrag = null;
+    drag.group.style.transform = "";
+    if (drag.target.hasPointerCapture(drag.pointer)) drag.target.releasePointerCapture(drag.pointer);
+  }
+
+  async function finishCombinedDrag() {
+    const drag = state.combinedDrag;
+    cancelCombinedDrag();
+    if (!drag || drag.key !== combinedKey() || drag.scale !== state.combinedPlot.scale || !drag.delta) return;
+    const offset = drag.offset + drag.delta;
+    if (!Number.isFinite(offset)) return;
+    const spec = state.combinedPlot;
+    spec.offsets = {...spec.offsets, [spec.scale]: {...spec.offsets[spec.scale], [drag.tag]: offset}};
+    await Plotly.restyle(drag.target, {y: [drag.values.map(value => typeof value === "number" && Number.isFinite(value) ? value + drag.delta : value)], meta: [{metric: drag.tag, offset}], hovertemplate: [combinedHover(offset)]}, [drag.index]);
+    if (drag.key !== combinedKey() || drag.target !== byId("combined-chart")) return;
+    await Plotly.relayout(drag.target, {"yaxis.title.text": combinedAxisLabel(spec)});
+    updateCombinedInteractionControls(drag.target); remember();
+  }
+
+  function bindCombinedInteractions(target) {
+    updateCombinedInteractionControls(target);
+    if (target.expmanCombinedInteractions) return;
+    target.expmanCombinedInteractions = true;
+    target.on("plotly_relayout", changes => {
+      if (has(changes, "dragmode") && changes.dragmode !== false && state.combinedDragMode) { state.combinedDragMode = false; updateCombinedInteractionControls(target); }
+    });
+    target.addEventListener("pointerdown", event => {
+      if (!state.combinedDragMode || event.button !== 0 || !state.combinedPlot) return;
+      const bounds = target.getBoundingClientRect(), layout = target._fullLayout;
+      const x = event.clientX - bounds.left - layout.xaxis._offset, y = event.clientY - bounds.top - layout.yaxis._offset;
+      if (x < 0 || y < 0 || x > layout.xaxis._length || y > layout.yaxis._length) return;
+      const position = layout.xaxis.p2l(x);
+      let closest = null, distance = 12;
+      target.data.forEach((trace, index) => {
+        if (trace.visible === false || trace.visible === "legendonly") return;
+        const value = window.ExpmanCombined.valueAt(trace, position, point => layout.xaxis.d2l(point));
+        const difference = value == null ? Infinity : Math.abs(layout.yaxis.l2p(value) - y);
+        if (difference < distance) { distance = difference; closest = index; }
+      });
+      if (closest == null) return;
+      const trace = target.data[closest], group = target.querySelectorAll(".scatterlayer .trace")[target._fullData.slice(0, closest).filter(item => item.visible === true).length];
+      if (!group) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      const tag = trace.meta.metric;
+      state.combinedDrag = {target, group, pointer: event.pointerId, key: combinedKey(), scale: state.combinedPlot.scale, index: closest, tag, values: trace.y, offset: combinedOffset(state.combinedPlot, tag), startY: event.clientY, startValue: layout.yaxis.p2l(y), axis: layout.yaxis, top: bounds.top + layout.yaxis._offset, delta: 0};
+      target.setPointerCapture(event.pointerId);
+      if (Plotly.Fx) Plotly.Fx.unhover(target);
+    }, true);
+    target.addEventListener("pointermove", event => {
+      const drag = state.combinedDrag;
+      if (!drag || drag.target !== target || event.pointerId !== drag.pointer) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      drag.delta = drag.axis.p2l(event.clientY - drag.top) - drag.startValue;
+      drag.group.style.transform = "translateY(" + (event.clientY - drag.startY) + "px)";
+    }, true);
+    target.addEventListener("pointerup", event => {
+      if (!state.combinedDrag || state.combinedDrag.target !== target) return;
+      event.preventDefault(); event.stopImmediatePropagation(); execute(finishCombinedDrag);
+    }, true);
+    target.addEventListener("pointercancel", cancelCombinedDrag, true);
+  }
+
+  async function toggleCombinedDrag() {
+    cancelCombinedDrag(); state.combinedDragMode = !state.combinedDragMode;
+    const target = byId("combined-chart");
+    if (target && target.data) await Plotly.relayout(target, {dragmode: state.combinedDragMode ? false : "zoom", ...(state.combinedDragMode ? {"yaxis.autorange": false, "yaxis.range": target._fullLayout.yaxis.range.slice()} : {})});
+    updateCombinedInteractionControls(target);
+  }
+
+  async function resetCombinedOffsets() {
+    cancelCombinedDrag();
+    if (!state.combinedPlot) return;
+    state.combinedPlot.offsets = {...state.combinedPlot.offsets, [state.combinedPlot.scale]: {}};
+    remember(); await renderCombined(state.serial);
+  }
+
+  function combinedCard() {
+    const spec = state.combinedPlot;
+    if (!spec) return "";
+    const run = state.runs.find(item => item.id === spec.experiment);
+    return `<article class="card combined-panel"><header class="card-header"><div><h2 class="card-title">Combined metrics · ${escape(run ? run.name : "Unavailable experiment")}</h2><div class="card-subtitle">ONE EXPERIMENT · COLORS IDENTIFY METRICS</div></div><div class="card-actions"><button class="button compact" data-action="combined-metrics">Edit metrics</button><button class="icon-button" data-action="remove-combined" aria-label="Remove combined metrics plot">×</button></div></header><div class="combined-controls"><label>Scaling<select id="combined-scale" aria-label="Combined metrics scaling">${combinedScaleOptions(spec.scale)}</select></label><label>Smooth<input id="combined-smoothing" type="number" min="0" max="0.999" step="any" value="${spec.smoothing}" aria-label="Combined metrics smoothing"></label><span id="combined-full-control">${combinedFullControl()}</span><button id="combined-fit-y" class="button compact" data-action="fit-combined-y" title="Independently scale each curve to 0–1 within the current time interval, preserving X zoom" disabled>Fit Y to view</button><button id="combined-drag-toggle" class="button compact" data-action="toggle-combined-drag" aria-pressed="${state.combinedDragMode}" title="Enable to drag a curve up or down; turn off to zoom" disabled>Move curves</button><button id="combined-reset-offsets" class="button compact" data-action="reset-combined-offsets" disabled>Reset offsets</button></div><div id="combined-move-hint" class="notice" ${state.combinedDragMode ? "" : "hidden"}>Drag near a curve to move it vertically. Display offsets only; hover retains recorded values. Turn off Move curves to zoom.</div><div id="combined-chart" class="chart">${loading("Loading combined metrics…")}</div><div id="combined-status" class="chart-footer" role="status"></div></article>`;
+  }
+
+  function combinedKey() {
+    const spec = state.combinedPlot;
+    return spec ? JSON.stringify([spec.experiment, spec.tags, state.scalarEpoch || 0]) : "";
+  }
+
+  function combinedFullControl() {
+    const item = state.combinedFull;
+    if (item && item.key === combinedKey()) {
+      if (!item.error && item.result) return `<span>${item.rendered ? "All values loaded" : "Rendering all values…"}</span>`;
+      if (!item.error) return `<button class="text-button" data-action="cancel-combined-full">Cancel · ${Math.floor(item.percent || 0)}%</button><progress max="100" value="${item.percent || 0}" aria-label="Load all combined values progress"></progress>`;
+    }
+    return `<button class="button compact" data-action="load-combined-full" title="${escape(item && item.error || "Load every recorded observation for these metrics; temporary for this session")}">${item && item.error ? "Retry all values" : "Load all values"}</button>`;
+  }
+
+  function updateCombinedFullControl() {
+    const target = byId("combined-full-control");
+    if (target) target.innerHTML = combinedFullControl();
+  }
+
+  function invalidateCombinedFull() {
+    const item = state.combinedFull;
+    if (!item || item.key === combinedKey()) return;
+    state.combinedFull = null; window.clearTimeout(item.timer);
+    if (item.id && !item.result && !item.error) fetch("/api/curves/all/jobs/" + item.id + "/cancel", {method: "POST"}).catch(() => {});
+    updateCombinedFullControl();
+  }
+
+  async function cancelCombinedFull() {
+    const item = state.combinedFull;
+    if (!item) return;
+    state.combinedFull = null; window.clearTimeout(item.timer);
+    updateCombinedFullControl();
+    if (item.id && !item.result && !item.error) await api("/api/curves/all/jobs/" + item.id + "/cancel", {});
+  }
+
+  async function pollCombinedFull(item) {
+    invalidateCombinedFull();
+    if (state.combinedFull !== item) return;
+    try {
+      const status = await api("/api/curves/all/jobs/" + item.id);
+      if (state.combinedFull !== item || item.key !== combinedKey()) return;
+      item.percent = status.percent;
+      if (["error", "cancelled"].includes(status.status)) throw new Error(status.error || "Loading cancelled");
+      if (status.status === "complete") {
+        const result = await api("/api/curves/all/jobs/" + item.id + "/result");
+        if (state.combinedFull !== item || item.key !== combinedKey()) return;
+        item.result = result;
+        state.combinedData = {key: item.key, result};
+        if (state.tab === "overview" && byId("combined-chart")) await renderCombined(state.serial);
+      } else item.timer = window.setTimeout(() => execute(() => pollCombinedFull(item)), 1000);
+    } catch (error) {
+      if (state.combinedFull === item && item.key === combinedKey()) { item.error = errorText(error); notify(item.error, true); }
+    }
+    updateCombinedFullControl();
+  }
+
+  async function loadCombinedFull() {
+    invalidateCombinedFull();
+    const spec = state.combinedPlot;
+    if (!spec || !overviewRuns().some(run => run.id === spec.experiment)) return;
+    const previous = state.combinedFull;
+    if (previous && !previous.error) return;
+    if (previous && previous.result) {
+      previous.error = null; previous.rendered = false;
+      state.combinedData = {key: previous.key, result: previous.result};
+      updateCombinedFullControl(); await renderCombined(state.serial); return;
+    }
+    const item = {key: combinedKey(), percent: 0};
+    state.combinedFull = item; updateCombinedFullControl();
+    try {
+      const job = await api("/api/curves/all/jobs", {experiment_ids: [spec.experiment], tags: spec.tags, source: "tensorboard", client_smoothing: true, smoothing: 0, x_axis: "step"});
+      if (state.combinedFull !== item || item.key !== combinedKey()) {
+        if (!state.combinedFull || state.combinedFull.key !== item.key) await api("/api/curves/all/jobs/" + job.id + "/cancel", {});
+        return;
+      }
+      item.id = job.id;
+      await pollCombinedFull(item);
+    } catch (error) {
+      if (state.combinedFull === item && item.key === combinedKey()) { item.error = errorText(error); notify(item.error, true); updateCombinedFullControl(); }
+    }
+  }
+
+  async function renderCombined(serial, crop = null) {
+    cancelCombinedDrag();
+    invalidateCombinedFull();
+    const generation = ++state.combinedRenderGeneration;
+    const spec = state.combinedPlot, key = combinedKey(), target = byId("combined-chart");
+    if (!spec || !target || state.tab !== "overview") return;
+    if (!overviewRuns().some(item => item.id === spec.experiment)) {
+      target.innerHTML = empty("Experiment outside the current selection", "Select its experiment or use Edit metrics to choose another.");
+      return;
+    }
+    try {
+      const cached = state.combinedData;
+      if (!cached || cached.key !== key || cached.provisional && (!state.metricsLoading || cached.discoverySignature !== state.metricsPreviewSignature)) {
+        const result = await api("/api/curves", {experiment_ids: [spec.experiment], tags: spec.tags, source: "tensorboard", client_smoothing: true, smoothing: 0, max_points: 2000, x_axis: "step"}, undefined, state.viewController && state.viewController.signal);
+        if (serial !== state.serial || generation !== state.combinedRenderGeneration || key !== combinedKey() || state.tab !== "overview") return;
+        if (!result.client_smoothing) throw new Error("Restart Expman and refresh to load combined metrics with browser smoothing.");
+        state.combinedData = {key, result, provisional: state.metricsLoading, discoverySignature: state.metricsPreviewSignature};
+      }
+      const result = state.combinedData.result, full = result.source === "all-values";
+      const current = {...state.combinedPlot}, colors = window.ExpmanPanels.defaultColors(current.tags), traces = [], missing = [];
+      for (const tag of current.tags) {
+        const curves = await prepareBrowserCurves("combined:" + JSON.stringify([current.experiment, tag]), result.curves[tag] || [], {...state.options, smoothing: current.smoothing, max_points: full ? 2 ** 31 - 1 : 2000});
+        if (serial !== state.serial || generation !== state.combinedRenderGeneration || key !== combinedKey() || state.tab !== "overview") return;
+        const curve = curves[0];
+        if (!curve || !curve.x.length) { missing.push(tag); continue; }
+        const offset = combinedOffset(current, tag);
+        const fitted = current.scaleWindow && current.scaleWindow.axis === state.options.x_axis ? current.scaleWindow : null;
+        const reference = fitted ? window.ExpmanCombined.windowValues({x: curve.x, y: curve.y}, [fitted.start, fitted.end], value => state.options.x_axis === "wall" ? value * 1000 : value) : curve.y;
+        traces.push({x: state.options.x_axis === "wall" ? curve.x.map(value => new Date(value * 1000)) : curve.x, y: window.ExpmanCombined.scale(curve.y, current.scale, reference).map(value => value == null ? null : value + offset), meta: {metric: tag, offset}, type: "scatter", mode: "lines", name: plotText(tag), uid: window.ExpmanPanels.traceUid(tag, "combined"), line: {color: colors[tag], width: 1.8, simplify: !full}, customdata: curve.x.map((value, index) => [curve.y[index], curve.original_y[index], window.ExpmanPanels.elapsedText(curve.elapsed[index])]), hovertemplate: combinedHover(offset)});
+      }
+      const axisLabel = combinedAxisLabel(current);
+      if (!traces.length && state.metricsLoading) {
+        if (!target.data) target.innerHTML = loading("Waiting for TensorBoard scalar observations…");
+        byId("combined-status").textContent = "Scalar indexing in progress · observations will appear automatically";
+        return;
+      }
+      const fitted = current.scaleWindow && current.scaleWindow.axis === state.options.x_axis ? current.scaleWindow : null;
+      const initialCrop = crop || (!target.data && fitted ? [fitted.start, fitted.end].map(value => fitted.axis === "wall" ? new Date(value) : value) : null);
+      cancelCombinedDrag();
+      await plot(target, traces, {hovermode: "x unified", showlegend: true, dragmode: state.combinedDragMode ? false : "zoom", uirevision: key + ":" + current.scale + ":" + state.options.x_axis, margin: {l: 65, r: 25, t: 15, b: 80}, xaxis: {title: {text: state.options.x_axis === "step" ? "Training step" : state.options.x_axis === "wall" ? "Wall time" : "Elapsed seconds"}, ...(initialCrop ? {range: initialCrop, autorange: false} : {})}, yaxis: {title: {text: axisLabel}, ...(current.scale === "minmax" ? {range: [-.05, 1.05]} : {})}});
+      if (serial !== state.serial || generation !== state.combinedRenderGeneration || key !== combinedKey() || state.tab !== "overview") return;
+      if (full && state.combinedFull && state.combinedFull.result === result) { state.combinedFull.rendered = true; state.combinedFull.error = null; }
+      updateCombinedFullControl();
+      bindCombinedInteractions(target);
+      byId("combined-smoothing").value = String(current.smoothing);
+      byId("combined-status").textContent = traces.length + " metrics · " + (full ? "all values loaded" : "TensorBoard retained samples") + " · " + (current.scale === "raw" ? "Shared original-value scale" : (fitted ? "Each curve independently scaled in the fitted time interval" : "Scaling uses each smoothed curve's loaded values")) + (missing.length ? " · No observations: " + missing.join(", ") : "");
+      if (missing.length) byId("combined-status").innerHTML = `<span>${escape(traces.length + " metrics · " + (state.metricsLoading ? "Still indexing: " : "No observations: ") + missing.join(", "))}</span><button class="button compact" data-action="retry-combined">Retry metrics</button>`;
+    } catch (error) {
+      if (error.name === "AbortError" || serial !== state.serial || generation !== state.combinedRenderGeneration || key !== combinedKey() || state.tab !== "overview") return;
+      if (state.combinedFull && state.combinedFull.key === key && state.combinedFull.result) { state.combinedFull.error = errorText(error); state.combinedFull.rendered = false; updateCombinedFullControl(); }
+      if (!target.data) target.innerHTML = empty("Could not load combined metrics", "Use Retry below to load the selected curves.");
+      byId("combined-status").innerHTML = `<span class="warning">${escape(errorText(error))}</span><button class="button compact" data-action="retry-combined">Retry</button>`;
+    }
+  }
+
   function curveCard(tag, index) {
     return `<article class="card overview-panel"><header class="card-header"><div style="min-width:0"><h2 class="card-title" title="${escape(tag)}">${escape(tag)}</h2><div class="card-subtitle">SCALAR · ${state.options.group ? "GROUP MEAN" : "INDIVIDUAL RUNS"}</div></div><div class="card-actions">${panelLogControl(tag)}${panelSmoothingControl(tag)}<span data-full-panel="${escape(tag)}">${fullPanelControl(tag)}</span><button class="text-button" data-action="raw-csv" data-value="${escape(tag)}">CSV ↓</button><button class="button compact panel-expand-button" data-action="expand-panel" data-value="${escape(tag)}" aria-label="Expand panel ${escape(tag)}" title="Expand panel">↗</button><button class="icon-button" data-action="remove-panel" data-value="${escape(tag)}" aria-label="Remove ${escape(tag)}">×</button></div></header><div class="chart" id="curve-${index}" data-overview-panel="${escape(tag)}"></div><div class="chart-footer"><span id="curve-note-${index}">Reading scalar observations…</span><span>Drag to zoom · Double-click chart to reset</span></div><div id="curve-coverage-${index}" class="panel-coverage"></div></article>`;
   }
 
   async function renderOverview(serial) {
+    invalidateCombinedFull();
     if (state.overviewObserver) state.overviewObserver.disconnect();
     state.overviewObserver = null;
     const matching = overviewRuns();
@@ -655,8 +1068,10 @@
         <label>Panel size <select id="panel-size">${[["small", "Small"], ["medium", "Medium"], ["large", "Large"]].map(([key, text]) => option(key, text, state.panelSize)).join("")}</select></label>
         <button class="button compact push ${state.showAllPanels ? "primary" : ""}" data-action="all-panels">All panels (${state.tags.length})</button>
         <button class="button compact" data-action="panels">Choose panels</button>
+        <button class="button compact" data-action="combined-metrics">Combine metrics</button>
       </div>
       ${state.options.group === "config" ? `<div class="notice">Grouping by ${escape(state.options.groupKeys.join(", "))}. <button class="text-button" data-action="group-keys">Change fields</button></div>` : ""}
+      ${combinedCard()}
       <div class="toolbar">
         <div class="search-box"><input type="search" id="panel-filter" value="${escape(state.panelQuery)}" placeholder="Filter panels by metric tag…" aria-label="Filter panels by metric tag"></div>
         <span class="muted">Showing ${page.from}–${page.to} of ${page.total}${tree ? ` expanded · ${tree.total} matching` : state.panelQuery ? " matching" : ""} panels</span>
@@ -672,6 +1087,7 @@
       <div class="notice">Means use interpolation inside recorded ranges. Bands show descriptive spread; standard error requires two contributors. Smoothing affects charts, not analysis outcomes.</div>`;
     renderOverviewLegend();
     remember();
+    if (state.combinedPlot) execute(() => renderCombined(serial));
     if (!page.tags.length) return;
     const pending = new Set(), loaded = new Set();
     state.overviewLoaded = loaded;
@@ -874,7 +1290,7 @@
     const baseline = state.runs.find(item => item.id === state.baseline), baselineValue = baseline ? score(baseline) : null;
     byId("view").innerHTML = `<div class="toolbar"><strong>${runs.length} experiments</strong><label>Result <select id="result-metric">${metricOptions(state.metric)}</select></label><label>Sort <select id="run-sort">${[["name", "Name"], ["updated", "Last updated"], ["result", "Result · descending"]].map(([key, text]) => option(key, text, state.sort)).join("")}</select></label><button class="button compact" data-action="columns">Columns</button><button class="button compact push" data-action="index-visible">Load visible summaries</button></div><div class="card"><div class="table-wrap"><table class="experiment-table"><thead><tr><th><input type="checkbox" id="toggle-visible" aria-label="Select all visible experiments" ${runs.length && runs.every(item => state.selected.has(item.id)) ? "checked" : ""}></th><th></th><th>EXPERIMENT</th><th>LAST RESULT</th><th>Δ VS BASELINE</th><th>LAST STEP</th>${state.columns.map(key => `<th title="${escape(key)}">${escape(key)}</th>`).join("")}<th>TAGS</th><th>UPDATED</th></tr></thead><tbody>${runs.map(item => {
       const value = score(item), delta = value == null || baselineValue == null ? null : value - baselineValue;
-      return `<tr class="${state.selected.has(item.id) ? "selected" : ""}"><td><input type="checkbox" data-select-run="${item.id}" aria-label="Select ${escape(item.name)}" ${state.selected.has(item.id) ? "checked" : ""}></td><td><button class="icon-button star ${item.starred ? "on" : ""}" data-action="star" data-value="${item.id}" aria-label="Toggle favorite for ${escape(item.name)}">${item.starred ? "★" : "☆"}</button></td><td><button class="run-name" data-action="edit-run" data-value="${item.id}"><span class="color-dot" style="background:${experimentColor(item.id)}"></span>${escape(item.name)}</button>${item.warnings.length ? '<span title="Run has ingestion warnings"> ⚠</span>' : ""}</td><td class="mono" title="Final unsmoothed value; select a run or load summaries to populate">${number(value)}</td><td class="mono ${delta > 0 ? "positive" : delta < 0 ? "negative" : "muted"}">${delta == null ? "—" : (delta > 0 ? "+" : "") + number(delta)}</td><td class="mono">${item.metrics[state.metric] ? number(item.metrics[state.metric].step) : "—"}</td>${state.columns.map(key => `<td class="mono" title="${escape(has(item.config, key) ? label(item.config[key]) : "Missing")}">${escape(has(item.config, key) ? label(item.config[key]).slice(0, 60) : "—")}</td>`).join("")}<td>${item.tags.map(tag => `<span class="tag">${escape(tag)}</span>`).join("")}</td><td class="muted">${new Date(item.modified * 1000).toLocaleString()}</td></tr>`;
+      return `<tr class="${state.selected.has(item.id) ? "selected" : ""}"><td><input type="checkbox" data-select-run="${item.id}" aria-label="Select ${escape(item.name)}" ${state.selected.has(item.id) ? "checked" : ""}></td><td><button class="icon-button star ${item.starred ? "on" : ""}" data-action="star" data-value="${item.id}" aria-label="Toggle favorite for ${escape(item.name)}" aria-pressed="${item.starred}" ${state.pendingStars.has(item.id) ? 'disabled aria-busy="true"' : ""}>${state.pendingStars.has(item.id) ? "…" : item.starred ? "★" : "☆"}</button></td><td><button class="run-name" data-action="edit-run" data-value="${item.id}"><span class="color-dot" style="background:${experimentColor(item.id)}"></span>${escape(item.name)}</button>${item.warnings.length ? '<span title="Run has ingestion warnings"> ⚠</span>' : ""}</td><td class="mono" title="Final unsmoothed value; select a run or load summaries to populate">${number(value)}</td><td class="mono ${delta > 0 ? "positive" : delta < 0 ? "negative" : "muted"}">${delta == null ? "—" : (delta > 0 ? "+" : "") + number(delta)}</td><td class="mono">${item.metrics[state.metric] ? number(item.metrics[state.metric].step) : "—"}</td>${state.columns.map(key => `<td class="mono" title="${escape(has(item.config, key) ? label(item.config[key]) : "Missing")}">${escape(has(item.config, key) ? label(item.config[key]).slice(0, 60) : "—")}</td>`).join("")}<td>${item.tags.map(tag => `<span class="tag">${escape(tag)}</span>`).join("")}</td><td class="muted">${new Date(item.modified * 1000).toLocaleString()}</td></tr>`;
     }).join("")}</tbody></table></div><div class="table-footer"><span>Results are final unsmoothed values. Unloaded summaries appear as —.</span><label>Baseline <select id="baseline">${state.runs.filter(item => state.selected.has(item.id)).map(item => option(item.id, item.name, state.baseline)).join("")}</select></label></div></div>${!runs.length ? empty("No matching experiments", "Adjust the search, filters, or collection.") : ""}`;
   }
 
@@ -1507,7 +1923,7 @@
       byId("view").innerHTML = loading("Discovering scalar curves for this experiment…");
       const result = await api("/api/metrics", {experiment_ids: [state.time.experiment]});
       if (serial !== state.serial) return;
-      mergeRuns(result.experiments);
+      mergeRuns(result.experiments, true);
       state.time.available = result.tags;
       state.time.loadedExperiment = state.time.experiment;
       state.timeData = null;
@@ -1673,6 +2089,28 @@
     return (event.score_type === "bernoulli" ? "Binary: smoothed Bernoulli score" : event.period != null ? "Continuous: robust phase residual score" : "Continuous: robust median/MAD score") + (event.context_window ? " · context " + event.context_window + " observations" : "") + (event.period != null ? " · expected cycle phase · period " + number(event.period) : "") + (event.boundary_context ? " · boundary variation included" : "");
   }
 
+  function showPanelHelp(help) {
+    document.querySelectorAll(".panel-help-tooltip").forEach(tooltip => { tooltip.hidden = true; });
+    window.clearTimeout(help.expmanHideTimer);
+    const tooltip = help.querySelector('[role="tooltip"]');
+    tooltip.style.top = "100%"; tooltip.style.bottom = "auto"; tooltip.style.maxHeight = "";
+    tooltip.hidden = false;
+    const header = help.closest(".card-header, .named-view-bar").getBoundingClientRect(), bounds = tooltip.getBoundingClientRect();
+    const below = window.innerHeight - header.bottom - 8, above = header.top - 8;
+    const upwards = bounds.bottom > window.innerHeight - 8 && above > below;
+    if (upwards) { tooltip.style.top = "auto"; tooltip.style.bottom = "100%"; }
+    tooltip.style.maxHeight = Math.max(40, Math.min(430, window.innerHeight * .6, upwards ? above : below)) + "px";
+  }
+
+  function timingHelp(title, kind) {
+    const data = state.timeData, settings = data.settings || {}, reference = escape(data.reference || "none");
+    const units = (settings.x_axis || state.time.x_axis) === "step" ? "training steps" : "seconds";
+    const introduction = `<p><strong>Reference:</strong> ${reference}. Automatic chooses the curve with the most detected events.</p>`;
+    const details = kind === "events" ? `<p>Pairs detected events with the reference, closest first, one-to-one within Match tolerance (${number(settings.tolerance == null ? state.time.tolerance : settings.tolerance)} ${units}). Matching uses timing, so spikes and dips can be paired.</p><p><strong>Delay = target time − reference time.</strong> Positive means target later; negative means target earlier. A reference event at 100 and target event at 104 give +4 ${units}.</p><p><strong>Matches:</strong> paired events. <strong>Median delay:</strong> median of their delays; — means no matches. <strong>Unmatched ref / target:</strong> remaining event counts, not a ratio.</p>`
+      : `<p>Compares the target selected below with the reference over their shared time range, using changes between neighboring points on a common grid. It includes regions without detected events.</p><p><strong>Lag:</strong> positive means target follows reference; negative means target leads. Units are ${units}; Max lag bounds the search.</p><p><strong>Correlation r:</strong> +1 means changes align in the same direction, −1 means opposite directions, and 0 means little linear association. Strongest lag maximizes |r|, so a negative correlation can win.</p><p><strong>Grid:</strong> spacing between tested delays, not measured timing precision. <strong>Pairs:</strong> valid observation pairs at that delay, not matched events.</p>`;
+    return `<div class="panel-help"><h2 class="card-title">${escape(title)}</h2><button type="button" class="panel-help-button" data-action="panel-help" aria-label="About ${escape(title)}" aria-describedby="${kind}-timing-help">?</button><span id="${kind}-timing-help" class="panel-help-tooltip" role="tooltip" hidden>${introduction}${details}<p>Logging cadence limits timing precision. Temporal association does not establish causation.</p></span></div>`;
+  }
+
   async function renderEvents() {
     const data = state.timeData;
     const strengths = new Map(Object.keys(data.curves).map(tag => [tag, Math.max(0, ...data.detections[tag].events.map(event => Math.abs(event.score)))]));
@@ -1685,7 +2123,7 @@
     const binaryCount = allTags.filter(tag => data.detections[tag].data_type === "binary").length;
     const periodicTags = allTags.filter(tag => data.detections[tag].periodic);
     const periodicSummary = periodicTags.length ? `<details class="notice"><summary>${periodicTags.length} curves scored relative to periodic fluctuation</summary><p>Regular cycle peaks are compared with the expected value at the same phase, including normal variation between cycles. Periods use ${escape(timeUnits().toLowerCase())}. Use Periodic behavior for spectra, phase comparisons, and cycle stability.</p><div class="table-wrap"><table><thead><tr><th>METRIC</th><th>PERIOD</th><th>OBSERVED CYCLES</th><th>BASELINE ERROR REDUCTION</th><th>ADJUSTED POINTS</th></tr></thead><tbody>${periodicTags.map(tag => { const cycle = data.detections[tag].periodic; return `<tr><td>${escape(tag)}</td><td>${number(cycle.period)}</td><td>${number(cycle.cycles)}</td><td>${number(cycle.improvement * 100)}%</td><td>${cycle.adjusted_points} / ${cycle.source_points}</td></tr>`; }).join("")}</tbody></table></div></details>` : "";
-    byId("time-results").innerHTML = `${display.html}<div class="notice">${escape(data.note)} Applied event threshold: |Event score| ≥ ${number(appliedThreshold)}. Continuous curves use robust local or cycle-phase residual scores. ${periodicTags.length} curves use a validated periodic baseline. ${binaryCount} binary curves use smoothed Bernoulli scores with a ${binaryWindow}-observation context. Boundary windows use recorded observations and account for nearby startup variation. The chart’s Display z-score uses each displayed curve’s mean and standard deviation. Correlation uses first differences to reduce shared-trend effects.</div>${periodicSummary}<article class="card"><header class="card-header"><div><h2 class="card-title">Aligned curves and detected events</h2><div class="card-subtitle">DISPLAY NORMALIZED · METRICS ORDERED BY STRONGEST EVENT</div></div><button class="button compact" data-action="time-export">Export analysis ↓</button></header><div id="event-curves" class="chart" style="height:340px"></div><div class="chart-footer">Median observation spacing: ${tags.map(tag => `${escape(tag)}: ${number(data.curves[tag].cadence)}`).join(" · ")} ${escape(timeUnits().toLowerCase())}</div></article><article class="card parallel-card"><header class="card-header"><div><h2 class="card-title">Event timeline and strongest events</h2><div class="card-subtitle">${timeline.length} displayed events · ${data.timeline.length} total · table sorted by |Event score|, strongest first · timeline positioned by time</div></div><button class="button compact" data-action="events-csv">Export events CSV ↓</button></header><div id="event-timeline" class="chart" style="height:${Math.max(200, tags.length * 42 + 70)}px"></div><div class="table-wrap" style="max-height:260px"><table><thead><tr><th>POSITION</th><th>METRIC</th><th>EVENT</th><th>VALUE</th><th>BASELINE</th><th>EVENT SCORE</th></tr></thead><tbody>${timeline.map(event => `<tr><td><button class="text-button" data-action="focus-event" data-value="${event.x}">${number(event.x)}</button></td><td>${escape(event.tag)}</td><td>${event.kind}</td><td class="mono">${number(event.value)}</td><td class="mono" title="${event.period != null ? "Expected value at this phase of a " + number(event.period) + "-unit cycle" : event.score_type === "bernoulli" ? "Expected probability of 1 in the binary context" : "Rolling median baseline of the analyzed signal"}">${number(event.baseline)}</td><td class="mono" title="${escape(eventScoreDetails(event))}">${number(event.score)}</td></tr>`).join("")}</tbody></table></div></article><div class="analysis-grid parallel-card"><article class="card"><header class="card-header"><div><h2 class="card-title">Event delays</h2><div class="card-subtitle">TARGET TIME − REFERENCE TIME</div></div></header><div class="table-wrap"><table><thead><tr><th>TARGET</th><th>MATCHES</th><th>MEDIAN DELAY</th><th>UNMATCHED REF / TARGET</th></tr></thead><tbody>${pairs.map(pair => `<tr><td>${escape(pair.target)}</td><td>${pair.events.matched}</td><td class="mono">${number(pair.events.median_delay)}</td><td>${pair.events.unmatched_reference} / ${pair.events.unmatched_target}</td></tr>`).join("")}</tbody></table></div><div class="notice">Matching is nearest-first and one-to-one inside the tolerance. Logging cadence and asynchronous writes limit ordering precision.</div></article><article class="card"><header class="card-header"><div><h2 class="card-title">Lagged correlation</h2><div class="card-subtitle" id="lag-note"></div></div><select id="lag-target" aria-label="Correlation target">${data.pairs.map((pair, index) => option(String(index), pair.target, "0")).join("")}</select></header><div id="lag-chart" class="chart"></div></article></div>${data.missing_metrics.length ? `<div class="notice warning">No observations: ${escape(data.missing_metrics.join(", "))}</div>` : ""}`;
+    byId("time-results").innerHTML = `${display.html}<div class="notice">${escape(data.note)} Applied event threshold: |Event score| ≥ ${number(appliedThreshold)}. Continuous curves use robust local or cycle-phase residual scores. ${periodicTags.length} curves use a validated periodic baseline. ${binaryCount} binary curves use smoothed Bernoulli scores with a ${binaryWindow}-observation context. Boundary windows use recorded observations and account for nearby startup variation. The chart’s Display z-score uses each displayed curve’s mean and standard deviation. Correlation uses first differences to reduce shared-trend effects.</div>${periodicSummary}<article class="card"><header class="card-header"><div><h2 class="card-title">Aligned curves and detected events</h2><div class="card-subtitle">DISPLAY NORMALIZED · METRICS ORDERED BY STRONGEST EVENT</div></div><button class="button compact" data-action="time-export">Export analysis ↓</button></header><div id="event-curves" class="chart" style="height:340px"></div><div class="chart-footer">Median observation spacing: ${tags.map(tag => `${escape(tag)}: ${number(data.curves[tag].cadence)}`).join(" · ")} ${escape(timeUnits().toLowerCase())}</div></article><article class="card parallel-card"><header class="card-header"><div><h2 class="card-title">Event timeline and strongest events</h2><div class="card-subtitle">${timeline.length} displayed events · ${data.timeline.length} total · table sorted by |Event score|, strongest first · timeline positioned by time</div></div><button class="button compact" data-action="events-csv">Export events CSV ↓</button></header><div id="event-timeline" class="chart" style="height:${Math.max(200, tags.length * 42 + 70)}px"></div><div class="table-wrap" style="max-height:260px"><table><thead><tr><th>POSITION</th><th>METRIC</th><th>EVENT</th><th>VALUE</th><th>BASELINE</th><th>EVENT SCORE</th></tr></thead><tbody>${timeline.map(event => `<tr><td><button class="text-button" data-action="focus-event" data-value="${event.x}">${number(event.x)}</button></td><td>${escape(event.tag)}</td><td>${event.kind}</td><td class="mono">${number(event.value)}</td><td class="mono" title="${event.period != null ? "Expected value at this phase of a " + number(event.period) + "-unit cycle" : event.score_type === "bernoulli" ? "Expected probability of 1 in the binary context" : "Rolling median baseline of the analyzed signal"}">${number(event.baseline)}</td><td class="mono" title="${escape(eventScoreDetails(event))}">${number(event.score)}</td></tr>`).join("")}</tbody></table></div></article><div class="analysis-grid parallel-card"><article class="card timing-help-card"><header class="card-header"><div>${timingHelp("Event delays", "events")}<div class="card-subtitle">TARGET TIME − REFERENCE TIME</div></div></header><div class="table-wrap"><table><thead><tr><th>TARGET</th><th>MATCHES</th><th>MEDIAN DELAY</th><th>UNMATCHED REF / TARGET</th></tr></thead><tbody>${pairs.map(pair => `<tr><td>${escape(pair.target)}</td><td>${pair.events.matched}</td><td class="mono">${number(pair.events.median_delay)}</td><td>${pair.events.unmatched_reference} / ${pair.events.unmatched_target}</td></tr>`).join("")}</tbody></table></div><div class="notice">Matching is nearest-first and one-to-one inside the tolerance. Logging cadence and asynchronous writes limit ordering precision.</div></article><article class="card timing-help-card"><header class="card-header"><div>${timingHelp("Lagged correlation", "lag")}<div class="card-subtitle" id="lag-note"></div></div><select id="lag-target" aria-label="Correlation target">${data.pairs.map((pair, index) => option(String(index), pair.target, "0")).join("")}</select></header><div id="lag-chart" class="chart"></div></article></div>${data.missing_metrics.length ? `<div class="notice warning">No observations: ${escape(data.missing_metrics.join(", "))}</div>` : ""}`;
     const traces = [];
     tags.forEach(tag => {
       const curve = data.curves[tag], mean = curve.y.reduce((total, value) => total + value, 0) / curve.y.length;
@@ -1752,6 +2190,16 @@
     byId("dialog").showModal();
   }
 
+  byId("dialog").addEventListener("close", () => {
+    const editing = state.filterEditing;
+    state.filterEditing = null;
+    if (!editing || !editing.live || editing.committed) return;
+    window.clearTimeout(state.filterLiveTimer);
+    Object.assign(state, editing.original);
+    byId("run-search").value = state.query;
+    execute(renderView);
+  });
+
   function checkDialog(title, choices, selected, form) {
     const bulk = form === "panels" ? '<button type="button" class="button compact" data-action="select-matching-choices">Select matching</button><button type="button" class="button compact" data-action="clear-choices">Clear selection</button>' : "";
     dialog(title, `<label class="field">Search<input type="search" id="choice-search" placeholder="Filter available fields…"></label><div class="check-list">${choices.map(choice => `<label data-choice="${escape(choice.toLowerCase())}"><input type="checkbox" name="choices" value="${escape(choice)}" ${selected.includes(choice) ? "checked" : ""}><span>${escape(choice)}</span></label>`).join("")}</div>`, form, bulk);
@@ -1807,16 +2255,28 @@
     const target = byId("filter-preview");
     if (!target) return;
     const filters = filterRulesFromForm();
-    const count = state.runs.filter(item => !item.archived && window.ExpmanFilters.matches(item.config, filters, item.path)).length;
-    target.textContent = filters.length ? `${count} unarchived experiments match all ${filters.length} conditions.` : "Add at least one condition.";
+    const editing = state.filterEditing;
+    const signature = rules => window.ExpmanViews.signature({filters: rules.map(rule => ({...rule, source: rule.source || "config"}))});
+    if (editing && editing.live && signature(filters) !== signature(state.filters)) {
+      state.filters = filters;
+      const saved = (state.workspace.state.named_filters || []).find(item => item.id === editing.identifier);
+      state.activeFilter = saved && signature(saved.filters) === signature(filters) ? saved.id : "";
+      const changed = followFilterSelection();
+      renderChrome(); renderRuns(); remember();
+      if (changed) { window.clearTimeout(state.filterLiveTimer); state.filterLiveTimer = window.setTimeout(() => execute(selectionChanged), 200); }
+    }
+    const count = editing && editing.live ? visibleRuns().length : state.runs.filter(item => !item.archived && window.ExpmanFilters.matches(item.config, filters, item.path)).length;
+    target.textContent = `${count} experiments match ${filters.length ? "all " + filters.length + " conditions" : "the current filters"}.`;
   }
 
   function filterDialog(identifier = "", namedRequired = false) {
     const saved = (state.workspace.state.named_filters || []).find(item => item.id === identifier);
     const rules = saved ? saved.filters : state.filters;
+    const original = {filters: JSON.parse(JSON.stringify(state.filters)), activeFilter: state.activeFilter, collection: state.collection, query: state.query};
     const keys = Array.from(new Set(state.runs.flatMap(item => Object.keys(item.config)))).sort();
     const extra = `${saved ? `<button type="button" class="button danger" data-action="delete-named-filter" data-value="${saved.id}">Delete</button>` : ""}<button type="submit" class="button" data-select-matches="true">Select matching</button>`;
-    dialog(saved ? "Edit named filter" : namedRequired ? "New named filter" : "Filter experiments", `<input type="hidden" name="filter_id" value="${escape(identifier)}"><label class="field">Name${saved || namedRequired ? "" : " · optional, saves this set for reuse"}<input type="text" name="filter_name" maxlength="120" value="${escape(saved ? saved.name : "")}" ${saved || namedRequired ? "required" : ""} placeholder="For example: transformer baselines"></label><p>All conditions must match. Choose Experiment path to match the path relative to the log directory; globs such as <code>*/exp07*</code> are supported. Numeric and boolean values use JSON literals; quoted values stay strings. Applying a view preserves selection; Select matching replaces it. Archived runs are excluded.</p><datalist id="filter-keys">${keys.map(key => `<option value="${escape(key)}"></option>`).join("")}</datalist><div id="filter-rules">${(rules.length ? rules : [{key: "", operator: "eq", value: ""}]).map(filterRule).join("")}</div><button type="button" class="button compact" data-action="add-filter-rule">+ Add condition</button><button type="button" class="text-button" data-action="clear-filters">Clear current filters</button><p id="filter-preview"></p>`, "filter-set", extra, saved || namedRequired ? "Save and apply" : "Apply filters");
+    dialog(saved ? "Edit named filter" : namedRequired ? "New named filter" : "Filter experiments", `<input type="hidden" name="filter_id" value="${escape(identifier)}"><label class="field">Name${saved || namedRequired ? "" : " · optional, saves this set for reuse"}<input type="text" name="filter_name" maxlength="120" value="${escape(saved ? saved.name : "")}" ${saved || namedRequired ? "required" : ""} placeholder="For example: transformer baselines"></label><p>All conditions must match. Changes update the Experiments table immediately; Cancel restores the previous filters. Manual selection is preserved; Select matching replaces it. Save filter stores the named set for reuse. Choose Experiment path for paths relative to the log directory, including globs such as <code>*/exp07*</code>. Numeric and boolean values use JSON literals; quoted values stay strings. Archived runs are excluded.</p><datalist id="filter-keys">${keys.map(key => `<option value="${escape(key)}"></option>`).join("")}</datalist><div id="filter-rules">${(rules.length ? rules : [{key: "", operator: "eq", value: ""}]).map(filterRule).join("")}</div><button type="button" class="button compact" data-action="add-filter-rule">+ Add condition</button><button type="button" class="text-button" data-action="clear-filters">Clear current filters</button><p id="filter-preview"></p>`, "filter-set", extra, saved || namedRequired ? "Save filter" : "Done");
+    state.filterEditing = {original, identifier, live: state.tab === "runs", committed: false};
     previewFilters();
   }
 
@@ -1834,8 +2294,33 @@
   }
 
   async function editRun(identifier) {
-    const item = await api("/api/experiments/" + identifier);
+    dialog("Experiment details", loading("Loading experiment details…"));
+    const pending = byId("dialog").querySelector(".dialog-body");
+    let item;
+    try { item = await api("/api/experiments/" + identifier); }
+    catch (error) {
+      if (byId("dialog").open && pending.isConnected) pending.innerHTML = `<div class="notice warning" role="alert">${escape(errorText(error))}</div><button class="button" data-action="edit-run" data-value="${escape(identifier)}">Retry</button>`;
+      throw error;
+    }
+    if (!byId("dialog").open || !pending.isConnected) return;
     dialog("Experiment details", `<input type="hidden" name="identifier" value="${item.id}"><label class="field">Display name<input name="name" maxlength="200" value="${escape(item.name)}"></label><label class="field">Tags · comma separated<input name="tags" value="${escape(item.tags.join(", "))}"></label><label class="field">Notes<textarea name="notes" maxlength="20000">${escape(item.notes)}</textarea></label><label><input type="checkbox" name="starred" ${item.starred ? "checked" : ""}> Favorite</label> <label><input type="checkbox" name="archived" ${item.archived ? "checked" : ""}> Archived</label><p class="mono">${escape(item.path)}</p>${item.warnings.map(warning => `<div class="notice warning">${escape(warning)}</div>`).join("")}${item.files.map(file => `<details><summary>${escape(file.name)} ${file.primary ? "· primary" : ""}</summary><pre class="source-code">${escape(file.content)}</pre></details>`).join("")}`, "run");
+  }
+
+  async function toggleFavorite(identifier) {
+    if (state.pendingStars.has(identifier)) return;
+    const item = state.runs.find(run => run.id === identifier);
+    if (!item) return;
+    state.pendingStars.add(identifier);
+    const controls = () => document.querySelectorAll('[data-action="star"][data-value="' + identifier + '"]');
+    controls().forEach(button => { button.disabled = true; button.setAttribute("aria-busy", "true"); button.textContent = "…"; });
+    try {
+      mergeRunAnnotations(await api("/api/experiments/" + identifier, {starred: !item.starred}, "PATCH"));
+      if (followFilterSelection()) await selectionChanged();
+      renderChrome();
+    } finally {
+      state.pendingStars.delete(identifier);
+      if (state.tab === "runs") renderRuns();
+    }
   }
 
   function saveFile(filename, content, type) {
@@ -1854,6 +2339,8 @@
   }
 
   async function renderView() {
+    if (followFilterSelection()) { await selectionChanged(); return; }
+    cancelCombinedDrag();
     if (state.tab !== "overview" && state.overviewObserver) { state.overviewObserver.disconnect(); state.overviewObserver = null; }
     if (state.tab !== "overview" && byId("panel-dialog").open) byId("panel-dialog").close();
     if (state.tab !== "configs") disconnectConfigScrolling();
@@ -1971,44 +2458,63 @@
     if (state.jsonMetricLoading || state.jsonMetricJob) renderJSONMetricProgress();
   }
 
-  async function refresh() {
+  function discoverySignature(runs) {
+    const fields = ["id", "path", "config", "config_files", "modified", ...annotationFields];
+    return window.ExpmanViews.signature({experiments: runs.map(run => ({...Object.fromEntries(fields.map(key => [key, run[key]])), summaries: Object.fromEntries(Object.entries(run.metrics || {}).filter(([tag, metric]) => metric.summary_only))})).sort((first, second) => first.id.localeCompare(second.id))});
+  }
+
+  function notifyDiscoveryWarnings(warnings) {
+    const seen = state.discoveryWarningsSeen || (state.discoveryWarningsSeen = new Set());
+    const added = warnings.filter(warning => !seen.has(warning));
+    warnings.forEach(warning => seen.add(warning));
+    if (added.length) notify(`${warnings.length} discovery ${warnings.length === 1 ? "warning" : "warnings"}. For details, open “How this workspace works ↗” at the bottom of the left sidebar.`);
+  }
+
+  async function refresh(background = false) {
     if (state.refreshing || state.busy || state.metricsLoading || state.jsonMetricLoading || state.configScalarJob || state.relationshipJob || state.relationshipStarting || state.configResizing) return;
+    if (background && (byId("dialog").open || byId("panel-dialog").open || state.combinedDrag || state.combinedFitting || state.configDragging)) return;
     state.refreshing = true;
     try {
       const result = await api("/api/refresh", {});
-      state.runs = []; mergeRuns(result.experiments);
+      const unchanged = (!result.revision || !state.workspace.revision || result.revision === state.workspace.revision) && discoverySignature(result.experiments) === discoverySignature(state.runs);
       state.workspace.warnings = result.warnings;
+      state.workspace.last_scan = result.last_scan;
+      state.workspace.revision = result.revision;
+      notifyDiscoveryWarnings(result.warnings);
+      if (background && unchanged) return;
+      state.runs = []; mergeRuns(result.experiments);
       state.selected = new Set(ids().filter(identifier => state.runs.some(item => item.id === identifier)));
+      followFilterSelection();
       state.time.loadedExperiment = "";
       state.scalarEpoch = (state.scalarEpoch || 0) + 1;
       state.curveEpoch = (state.curveEpoch || 0) + 1;
       await selectionChanged();
-      if (result.warnings.length) notify(`${result.warnings.length} discovery warnings. Open workspace help for details.`);
     } finally { state.refreshing = false; }
   }
 
   const actions = {
+    "new-named-view": () => namedViewDialog(),
+    "rename-named-view": () => namedViewDialog(true),
+    "update-named-view": () => { const view = (state.workspace.state.named_views || []).find(item => item.id === state.activeNamedView); if (view) return writeNamedView(view.name, view.id); },
+    "revert-named-view": () => loadNamedView(state.activeNamedView),
+    "delete-named-view": deleteNamedView,
     "appearance": appearanceDialog,
     "json-metrics": jsonMetricsDialog,
     "retry-json-metrics": async () => { state.jsonMetricLoading = true; renderJSONMetricProgress(); await pollJSONMetrics(); },
     "appearance-reset": () => setAppearanceForm(window.ExpmanAppearance.defaults),
     "new-named-filter": () => filterDialog("", true),
     "edit-named-filter": () => filterDialog(state.activeFilter, true),
-    "apply-named-filter": async () => {
-      const saved = state.workspace.state.named_filters.find(item => item.id === state.activeFilter);
-      if (!saved) throw new Error("Choose a named filter first");
-      applyNamedDefinition(saved); state.tab = "runs"; await renderView();
-    },
     "select-named-filter": async () => {
       const saved = state.workspace.state.named_filters.find(item => item.id === state.activeFilter);
       if (!saved) throw new Error("Choose a named filter first");
       const result = await api("/api/filters/" + saved.id + "/matches", {});
-      applyNamedDefinition(saved); state.selected = new Set(result.experiment_ids);
+      applyNamedDefinition(saved); manualSelection(); state.selected = new Set(result.experiment_ids);
       await selectionChanged(); notify(`${result.count} experiments selected using ${saved.name}`);
     },
     "delete-named-filter": async identifier => {
       state.workspace.state.named_filters = await api("/api/filters/" + identifier, {}, "DELETE");
-      if (state.activeFilter === identifier) state.activeFilter = "";
+      if (state.activeFilter === identifier || state.filterEditing && state.filterEditing.identifier === identifier) { state.activeFilter = ""; state.filters = []; }
+      if (state.filterEditing) state.filterEditing.committed = true;
       byId("dialog").close(); await renderView(); notify("Named filter deleted");
     },
     "add-filter-rule": () => {
@@ -2018,17 +2524,26 @@
     "remove-filter-rule": (value, button) => { button.closest(".filter-rule").remove(); previewFilters(); },
     "tab": async value => { state.tab = value; await renderView(); },
     "collection": async value => { state.collection = value; state.tab = "runs"; await renderView(); },
-    "refresh": refresh,
-    "select-visible": async () => { visibleRuns().forEach(item => state.selected.add(item.id)); await selectionChanged(); },
-    "clear-selection": async () => { state.selected.clear(); await selectionChanged(); },
-    "unselect": async value => { state.selected.delete(value); await selectionChanged(); },
+    "refresh": () => refresh(),
+    "select-visible": async () => { manualSelection(); visibleRuns().forEach(item => state.selected.add(item.id)); await selectionChanged(); },
+    "clear-selection": async () => { manualSelection(); state.selected.clear(); await selectionChanged(); },
+    "unselect": async value => { manualSelection(); state.selected.delete(value); await selectionChanged(); },
     "new-group": () => openGroup(),
     "edit-group": value => openGroup(value),
-    "select-group": async value => { const group = state.workspace.state.groups.find(item => item.id === value); state.selected = new Set(group.experiment_ids.filter(identifier => state.runs.some(item => item.id === identifier))); state.options.group = "saved"; state.tab = "overview"; await selectionChanged(); },
+    "select-group": async value => { manualSelection(); const group = state.workspace.state.groups.find(item => item.id === value); state.selected = new Set(group.experiment_ids.filter(identifier => state.runs.some(item => item.id === identifier))); state.options.group = "saved"; state.tab = "overview"; await selectionChanged(); },
     "delete-group": async value => { state.workspace.state = await api("/api/groups/" + value, {}, "DELETE"); byId("dialog").close(); renderChrome(); await renderView(); },
     "close-dialog": () => byId("dialog").close(),
     "edit-run": editRun,
-    "star": async value => { const item = state.runs.find(run => run.id === value); mergeRuns([await api("/api/experiments/" + value, {starred: !item.starred}, "PATCH")]); renderChrome(); renderRuns(); },
+    "star": toggleFavorite,
+    "combined-metrics": combinedDialog,
+    "remove-combined": async () => { state.combinedPlot = null; state.combinedData = null; invalidateCombinedFull(); await renderView(); },
+    "retry-combined": () => { if (state.combinedData && state.combinedData.result.source !== "all-values") state.combinedData = null; return renderCombined(state.serial); },
+    "fit-combined-y": fitCombinedY,
+    "toggle-combined-drag": toggleCombinedDrag,
+    "reset-combined-offsets": resetCombinedOffsets,
+    "load-combined-full": loadCombinedFull,
+    "cancel-combined-full": cancelCombinedFull,
+    "panel-help": (value, button) => showPanelHelp(button.closest(".panel-help")),
     "panels": () => checkDialog("Choose scalar panels", state.tags, state.panels, "panels"),
     "all-panels": async () => { state.showAllPanels = true; state.panels = state.tags.slice(); state.panelQuery = ""; state.panelPage = 0; await renderView(); },
     "reload-metrics": selectionChanged,
@@ -2066,7 +2581,7 @@
     "clear-parallel-brush": renderParallel,
     "retry-parallel": renderParallel,
     "condition": async value => { state.condition = value; byId("condition-select").value = value; await renderCondition(); },
-    "apply-brush": async () => { state.selected = new Set(state.brushed); await selectionChanged(); },
+    "apply-brush": async () => { manualSelection(); state.selected = new Set(state.brushed); await selectionChanged(); },
     "config-prev": () => { state.configPage -= 1; renderConfigTable(); },
     "config-next": () => { state.configPage += 1; renderConfigTable(); },
     "reset-config-order": () => { state.configOrder = []; state.configPage = 0; renderConfigTable(); remember(); },
@@ -2081,9 +2596,9 @@
     "compare-csv": () => { if (state.comparison) saveCSV("expman-config-comparison.csv", window.ExpmanConfigurations.comparisonRecords(state.comparison, configurationRows(), configCellText)); },
     "analysis-csv": () => { if (!state.analysis) return; const keys = Array.from(new Set(state.analysis.records.flatMap(record => Object.keys(record.config)))).sort(); saveCSV("expman-condition-analysis.csv", [["experiment", "metric", "reduction", "smoothing", "at_step", "outcome", "first_step", "last_step", ...keys], ...state.analysis.records.map(record => [record.name, state.analysis.metric, state.analysis.reduction, state.analysis.smoothing, state.analysis.at_step, record.result, record.first_step, record.last_step, ...keys.map(key => has(record.config, key) ? label(record.config[key]) : "(missing)")])]); },
     "analysis-window": () => { const settings = state.analysisWindow || {}, summary = relationshipSummary(); dialog("Outcome settings", `<p>Automatic summaries inherit the configured scalar’s mode, target step, and smoothing. Smoothed outcomes use complete history before the window or fixed-step interpolation. Clear an override to inherit it again.</p><label class="field">Start step<input type="number" name="start_step" value="${settings.start_step == null ? "" : settings.start_step}"></label><label class="field">End step<input type="number" name="end_step" value="${settings.end_step == null ? "" : settings.end_step}"></label><label class="field">Target step override<input type="number" name="at_step" placeholder="${summary.at_step == null ? "Required for fixed-step summaries" : summary.at_step}" value="${settings.at_step == null ? "" : settings.at_step}"></label><label class="field">Smoothing override<input type="number" name="smoothing" min="0" max="0.999" step="any" placeholder="${summary.smoothing}" value="${state.relationshipSmoothing == null ? "" : state.relationshipSmoothing}"></label>`, "analysis-window"); },
-    "index-visible": async () => { if (state.indexing) return; state.indexing = true; try { const runs = visibleRuns(); for (let offset = 0; offset < runs.length; offset += 5) { const result = await api("/api/metrics", {experiment_ids: runs.slice(offset, offset + 5).map(item => item.id)}); mergeRuns(result.experiments); if (state.tab === "runs") renderRuns(); } notify("Visible experiment summaries loaded"); } finally { state.indexing = false; } },
+    "index-visible": async () => { if (state.indexing) return; state.indexing = true; try { const runs = visibleRuns(); for (let offset = 0; offset < runs.length; offset += 5) { const result = await api("/api/metrics", {experiment_ids: runs.slice(offset, offset + 5).map(item => item.id)}); mergeRuns(result.experiments, true); if (state.tab === "runs") renderRuns(); } notify("Visible experiment summaries loaded"); } finally { state.indexing = false; } },
     "filters": () => filterDialog(state.activeFilter),
-    "clear-filters": async () => { state.filters = []; state.activeFilter = ""; byId("dialog").close(); await renderView(); },
+    "clear-filters": async () => { state.filters = []; state.activeFilter = ""; if (state.filterEditing) state.filterEditing.committed = true; byId("dialog").close(); await renderView(); },
     "clear-all-filters": async () => { state.filters = []; state.activeFilter = ""; state.query = ""; state.collection = "all"; byId("run-search").value = ""; await renderView(); },
     "analyze-time": analyzeTime,
     "retry-time": async () => {
@@ -2102,6 +2617,19 @@
     "exports": () => dialog("Export workspace data", '<p>Raw CSV downloads are available on each scalar panel. Configuration and relationship views export their displayed records. Time-series views export full results and settings.</p><p><a class="button" href="/api/export/workspace.json" download>Download annotations, groups, and exclusions ↓</a></p>'),
     "help": () => dialog("About this workspace", `<p>Expman reads TensorBoard events and YAML/JSON configurations from <code>${escape(state.workspace.logdir)}</code>. Renaming, archiving, notes, groups, exclusions, and saved views are stored in <code>${escape(state.workspace.state_file)}</code>.</p><p>User-wide settings are stored in <code>${escape(state.workspace.settings_file)}</code>.</p>${state.workspace.migrated_from ? `<p>Existing workspace state was copied from <code>${escape(state.workspace.migrated_from)}</code>. The original remains as a backup.</p>` : ""}<p>Choose runs in Experiments, then compare their curves, configurations, and outcomes. Time series investigates one experiment independently of the shared selection. TensorBoard provides the native logging plugins.</p><p>Use <kbd>/</kbd> to search and Escape to close dialogs. Auto refresh rescans every 30 seconds when requests are idle.</p>${state.workspace.warnings.length ? '<h3>Discovery warnings</h3>' + state.workspace.warnings.map(warning => `<div class="notice warning">${escape(warning)}</div>`).join("") : ""}<p><a href="/design" target="_blank" rel="noopener">Read the design document ↗</a></p>`)
   };
+
+  for (const name of ["pointerover", "focusin"]) document.addEventListener(name, event => {
+    const help = event.target.closest && event.target.closest(".panel-help");
+    if (!help || help.contains(event.relatedTarget)) return;
+    showPanelHelp(help);
+  });
+  for (const name of ["pointerout", "focusout"]) document.addEventListener(name, event => {
+    const help = event.target.closest && event.target.closest(".panel-help");
+    if (!help || help.contains(event.relatedTarget)) return;
+    help.expmanHideTimer = window.setTimeout(() => {
+      if (!help.contains(document.activeElement) && !help.matches(":hover")) help.querySelector('[role="tooltip"]').hidden = true;
+    }, 120);
+  });
 
   document.addEventListener("click", event => {
     const button = event.target.closest("[data-action]");
@@ -2130,6 +2658,11 @@
 
   document.addEventListener("input", event => {
     const element = event.target;
+    if (element.id === "combined-smoothing" && state.combinedPlot) {
+      const value = optionalNumber(element.value);
+      if (value != null && Number.isFinite(value) && value >= 0 && value <= .999) { state.combinedPlot.smoothing = value; remember(); execute(() => renderCombined(state.serial)); }
+      return;
+    }
     if (element.closest('[data-form="appearance"]')) previewAppearance();
     if (element.closest('[data-form="filter-set"]')) previewFilters();
     if (element.id === "choice-search") document.querySelectorAll("[data-choice]").forEach(choice => { choice.hidden = !choice.dataset.choice.includes(element.value.toLowerCase()); });
@@ -2161,6 +2694,12 @@
     if (element.id === "run-search") {
       state.query = element.value; renderChrome(); remember();
       window.clearTimeout(state.runSearchTimer);
+      if (state.selectionMode === "filters") {
+        followFilterSelection(); renderChrome(); remember();
+        if (state.tab === "runs") renderRuns();
+        state.runSearchTimer = window.setTimeout(() => execute(selectionChanged), 250);
+        return;
+      }
       if (state.tab === "runs") renderRuns();
       if (state.tab === "overview") {
         state.serial += 1;
@@ -2177,6 +2716,30 @@
 
   document.addEventListener("change", event => execute(async () => {
     const element = event.target, identifier = element.id;
+    if (identifier === "named-view-choice") { await loadNamedView(element.value); return; }
+    if (identifier === "selection-mode") {
+      state.selectionMode = element.value === "filters" ? "filters" : "manual";
+      followFilterSelection(); setAutoRefresh(state.workspace.settings.auto_refresh);
+      await selectionChanged(); return;
+    }
+    if (identifier === "combined-scale" || identifier === "combined-smoothing") {
+      if (!state.combinedPlot) return;
+      if (identifier === "combined-scale") { state.combinedPlot.scale = element.value; state.combinedPlot.scaleWindow = null; }
+      else {
+        const value = optionalNumber(element.value);
+        if (value == null || !Number.isFinite(value) || value < 0 || value > .999) { element.value = String(state.combinedPlot.smoothing); throw new Error("Smoothing must be between 0 and 0.999"); }
+        if (value === state.combinedPlot.smoothing) return;
+        state.combinedPlot.smoothing = value;
+      }
+      remember(); await renderCombined(state.serial); return;
+    }
+    if (element.name === "combined_experiment") {
+      const form = element.closest('[data-form="combined"]');
+      const selected = Array.from(form.querySelectorAll('input[name="choices"]:checked')).map(control => control.value);
+      form.querySelector(".check-list").innerHTML = combinedChoices(element.value, selected);
+      form.querySelector("#choice-search").value = "";
+      return;
+    }
     if (["smoothing", "smoothing-value"].includes(identifier)) { await setSmoothing(optionalNumber(element.value)); return; }
     if (typeof element.dataset.panelSmoothing === "string") { await setSmoothing(optionalNumber(element.value), element.dataset.panelSmoothing); return; }
     if (typeof element.dataset.overviewColor === "string") { await setOverviewColor(element.dataset.overviewColor, element.value); return; }
@@ -2197,7 +2760,12 @@
       scalarForm.elements.namedItem("scalar_smoothing").disabled = !mode.includes("smoothed");
       return;
     }
-    if (identifier === "named-filter-choice") { state.activeFilter = element.value; renderChrome(); remember(); return; }
+    if (identifier === "named-filter-choice") {
+      const saved = (state.workspace.state.named_filters || []).find(item => item.id === element.value);
+      if (saved) applyNamedDefinition(saved);
+      else { state.activeFilter = ""; state.filters = []; }
+      await renderView(); return;
+    }
     if (element.closest('[data-form="filter-set"]')) {
       const row = element.closest(".filter-rule");
       if (row) {
@@ -2213,8 +2781,8 @@
       else previewAppearance();
       return;
     }
-    if (element.dataset.selectRun) { if (element.checked) state.selected.add(element.dataset.selectRun); else state.selected.delete(element.dataset.selectRun); syncSelectionCheckboxes(); await selectionChanged(); return; }
-    if (identifier === "toggle-visible") { visibleRuns().forEach(item => element.checked ? state.selected.add(item.id) : state.selected.delete(item.id)); syncSelectionCheckboxes(); await selectionChanged(); return; }
+    if (element.dataset.selectRun) { manualSelection(); if (element.checked) state.selected.add(element.dataset.selectRun); else state.selected.delete(element.dataset.selectRun); syncSelectionCheckboxes(); await selectionChanged(); return; }
+    if (identifier === "toggle-visible") { manualSelection(); visibleRuns().forEach(item => element.checked ? state.selected.add(item.id) : state.selected.delete(item.id)); syncSelectionCheckboxes(); await selectionChanged(); return; }
     if (identifier === "auto-refresh") {
       try {
         state.workspace.settings = await api("/api/settings", {auto_refresh: element.checked}, "PUT");
@@ -2264,11 +2832,18 @@
     const selectMatches = Boolean(event.submitter && event.submitter.dataset.selectMatches === "true");
     execute(async () => {
       const data = new FormData(form), type = form.dataset.form, choices = data.getAll("choices");
+      if (type === "new-view" || type === "rename-view") { await writeNamedView(String(data.get("view_name")), type === "rename-view" ? state.activeNamedView : "", type === "rename-view"); return; }
       if (type === "json-metrics") {
         await loadJSONMetrics(String(data.get("json_metric_paths") || "").split("\n").map(path => path.trim()).filter(Boolean));
         return;
       }
       if (type === "config-scalar") saveConfigScalar(data);
+      if (type === "combined") {
+        if (!choices.length || choices.length > 32) throw new Error("Choose between 1 and 32 metrics for the combined plot");
+        state.combinedPlot = window.ExpmanCombined.preferences({experiment: data.get("combined_experiment"), tags: choices, scale: data.get("combined_scale"), smoothing: state.combinedPlot ? state.combinedPlot.smoothing : state.options.smoothing, offsets: state.combinedPlot && state.combinedPlot.experiment === data.get("combined_experiment") ? state.combinedPlot.offsets : {}, scaleWindow: state.combinedPlot && state.combinedPlot.experiment === data.get("combined_experiment") ? state.combinedPlot.scaleWindow : null});
+        if (!state.combinedData || state.combinedData.key !== combinedKey()) state.combinedData = null;
+        invalidateCombinedFull();
+      }
       if (type === "appearance") {
         state.workspace.settings = await api("/api/settings", {appearance: appearanceFromForm()}, "PUT");
         window.ExpmanAppearance.apply(document.documentElement, state.workspace.settings.appearance);
@@ -2276,20 +2851,22 @@
       if (type === "filter-set") {
         const filters = filterRulesFromForm(), name = String(data.get("filter_name")).trim();
         const identifier = String(data.get("filter_id"));
-        if (!filters.length) throw new Error("Add at least one condition");
+        if (!filters.length && (name || identifier)) throw new Error("Add at least one condition to save a named filter");
         let saved = null;
         if (name || identifier) {
           saved = await api("/api/filters" + (identifier ? "/" + identifier : ""), {name, filters}, identifier ? "PUT" : "POST");
           state.workspace.state.named_filters = await api("/api/filters");
         }
         state.activeFilter = saved ? saved.id : "";
-        state.filters = filters; state.collection = "all"; state.query = "";
-        byId("run-search").value = "";
+        state.filters = filters;
+        if (selectMatches || !state.filterEditing || !state.filterEditing.live) { state.collection = "all"; state.query = ""; byId("run-search").value = ""; }
         if (selectMatches) {
           const result = saved ? await api("/api/filters/" + saved.id + "/matches", {}) : {experiment_ids: state.runs.filter(item => !item.archived && window.ExpmanFilters.matches(item.config, filters, item.path)).map(item => item.id)};
-          state.selected = new Set(result.experiment_ids);
+          manualSelection(); state.selected = new Set(result.experiment_ids);
+          if (state.filterEditing) state.filterEditing.committed = true;
           byId("dialog").close(); await selectionChanged(); notify(`${state.selected.size} matching experiments selected`); return;
         }
+        if (state.filterEditing) state.filterEditing.committed = true;
         state.tab = "runs";
       }
       if (type === "panels") { state.panels = choices; state.showAllPanels = choices.length === state.tags.length; state.panelPage = 0; state.panelQuery = ""; }
@@ -2298,7 +2875,7 @@
       if (type === "parallel-keys") { if (choices.length > 10) throw new Error("Choose at most 10 dimensions"); state.parallelKeys = choices; state.parallelKeysConfigured = true; }
       if (type === "ignored") await updateConfigExclusions({patterns: String(data.get("patterns")).split("\n"), files: String(data.get("files")).split("\n")});
       if (type === "group") { const identifier = data.get("identifier"); await api("/api/groups" + (identifier ? "/" + identifier : ""), {name: data.get("name"), experiment_ids: data.getAll("members")}, identifier ? "PUT" : "POST"); state.workspace.state = (await api("/api/workspace")).state; }
-      if (type === "run") { mergeRuns([await api("/api/experiments/" + data.get("identifier"), {name: data.get("name"), notes: data.get("notes"), tags: String(data.get("tags")).split(",").map(tag => tag.trim()).filter(Boolean), starred: data.has("starred"), archived: data.has("archived")}, "PATCH")]); }
+      if (type === "run") { mergeRunAnnotations(await api("/api/experiments/" + data.get("identifier"), {name: data.get("name"), notes: data.get("notes"), tags: String(data.get("tags")).split(",").map(tag => tag.trim()).filter(Boolean), starred: data.has("starred"), archived: data.has("archived")}, "PATCH")); }
       if (type === "analysis-window") {
         const smoothing = optionalNumber(String(data.get("smoothing") || ""));
         if (smoothing != null && (!Number.isFinite(smoothing) || smoothing < 0 || smoothing > .999)) throw new Error("Smoothing must be between 0 and 0.999");
@@ -2312,6 +2889,11 @@
   });
 
   document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && state.combinedDrag) { event.preventDefault(); cancelCombinedDrag(); return; }
+    if (event.key === "Escape") {
+      const help = document.querySelectorAll(".panel-help-tooltip:not([hidden])");
+      if (help.length) { help.forEach(tooltip => { tooltip.hidden = true; }); event.preventDefault(); return; }
+    }
     const separator = event.target.closest && event.target.closest("[data-config-resize]");
     if (separator && ["ArrowLeft", "ArrowRight"].includes(event.key)) {
       event.preventDefault();
@@ -2334,6 +2916,7 @@
   });
 
   window.addEventListener("pagehide", () => {
+    if (state.namedViewLoading) return;
     if (!state.pendingView) return;
     window.clearTimeout(state.saveViewTimer);
     fetch("/api/view", {method: "PUT", headers: {"Content-Type": "application/json"},
@@ -2345,11 +2928,14 @@
     state.workspace = results[0]; mergeRuns(results[1].experiments);
     state.workspace.settings = state.workspace.settings || {auto_refresh: false};
     state.workspace.state.named_filters = state.workspace.state.named_filters || [];
+    state.workspace.state.named_views = state.workspace.state.named_views || [];
     window.ExpmanAppearance.apply(document.documentElement, state.workspace.settings.appearance);
     try {
       const persisted = state.workspace.state.view || {};
       const saved = Object.keys(persisted).length ? persisted : JSON.parse(localStorage.getItem("expman:" + state.workspace.id) || "null");
       if (saved) {
+        state.activeNamedView = state.workspace.state.named_views.some(view => view.id === saved.namedView) ? saved.namedView : "";
+        state.selectionMode = saved.selectionMode === "filters" ? "filters" : "manual";
         state.selected = new Set((saved.selected || []).filter(identifier => state.runs.some(item => item.id === identifier)));
         state.panels = saved.panels || []; state.metric = saved.metric || ""; state.columns = saved.columns || []; state.parallelKeys = saved.parallelKeys || [];
         state.baseline = typeof saved.baseline === "string" ? saved.baseline : "";
@@ -2361,6 +2947,10 @@
         state.parallelKeysConfigured = typeof saved.parallelKeysConfigured === "boolean" ? saved.parallelKeysConfigured : state.parallelKeys.length > 0;
         state.diffOnly = saved.diffOnly !== false;
         state.configQuery = typeof saved.configQuery === "string" ? saved.configQuery : "";
+        state.sort = ["name", "updated", "result"].includes(saved.sort) ? saved.sort : "name";
+        state.showIgnored = saved.showIgnored === true;
+        state.condition = typeof saved.condition === "string" ? saved.condition : "";
+        state.analysisWindow = Object.fromEntries(["start_step", "end_step", "at_step"].filter(key => saved.analysisWindow && (saved.analysisWindow[key] === null || Number.isFinite(saved.analysisWindow[key]))).map(key => [key, saved.analysisWindow[key]]));
         state.showAllPanels = saved.showAllPanels === true;
         state.panelQuery = typeof saved.panelQuery === "string" ? saved.panelQuery : "";
         state.panelPage = Number.isFinite(saved.panelPage) ? saved.panelPage : 0;
@@ -2376,6 +2966,7 @@
         }
         if (saved.options) Object.assign(state.options, saved.options);
         if (!Number.isFinite(state.options.smoothing) || state.options.smoothing < 0 || state.options.smoothing > .999) state.options.smoothing = .4;
+        state.combinedPlot = window.ExpmanCombined.preferences(saved.combinedPlot, state.options.smoothing);
         delete state.options.logY;
         delete state.options.curveSource;
         state.options.ignoreOutliers = state.options.ignoreOutliers === true;
@@ -2387,7 +2978,7 @@
         if (tabs[saved.tab]) state.tab = saved.tab;
       } else state.selected = new Set(state.runs.filter(item => !item.archived).sort((first, second) => second.modified - first.modified).slice(0, 4).map(item => item.id));
     } catch (error) { state.selected = new Set(state.runs.slice(-4).map(item => item.id)); }
-    renderChrome(); await selectionChanged(); setAutoRefresh(state.workspace.settings.auto_refresh);
+    followFilterSelection(); renderChrome(); await selectionChanged(); setAutoRefresh(state.workspace.settings.auto_refresh);
   }
 
   boot().catch(error => { byId("view").innerHTML = empty("Could not open this workspace", error.message); notify(error.message, true); });

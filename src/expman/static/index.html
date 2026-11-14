@@ -10,6 +10,8 @@
   <script defer src="/assets/plotly.min.js"></script>
   <script defer src="/static/appearance.js"></script>
   <script defer src="/static/panels.js"></script>
+  <script defer src="/static/combined.js"></script>
+  <script defer src="/static/views.js"></script>
   <script defer src="/static/configurations.js"></script>
   <script defer src="/static/relationships.js"></script>
   <script defer src="/static/signals.js"></script>
@@ -33,15 +35,27 @@
     <div class="workspace">
       <div class="page-heading"><div><div class="eyebrow">EXPERIMENT WORKBENCH</div><h1 id="page-title">Overview</h1><p id="page-description">Every run tells a story. Compare the evidence.</p></div><div class="heading-actions"><button class="button" data-action="exports">↓ Export</button><button class="button primary" data-action="new-group">+ Create group</button></div></div>
       <div id="stats" class="stats"></div>
+      <section class="named-view-bar" aria-label="Named views">
+        <label>Named view <select id="named-view-choice" aria-label="Named view"></select></label>
+        <span class="panel-help"><button type="button" class="panel-help-button" data-action="panel-help" aria-label="About named views" aria-describedby="named-view-help">?</button><span id="named-view-help" class="panel-help-tooltip" role="tooltip" hidden><p>A named view saves settings across all workspace pages, including experiment selection, filters, plots, configuration columns, and analysis settings. Select a view to load its saved settings and replace the current working copy.</p><p>Edits autosave the working copy and mark the view <strong>Modified</strong>. Click <strong>Update view</strong> to replace the saved snapshot, <strong>Save as new view</strong> to create another, or <strong>Revert</strong> to discard changes and reload the saved settings.</p><p><strong>Manual</strong> selection saves specific experiments. <strong>Follow filters</strong> selects all matches and automatically includes new matching experiments when logs are rescanned every 30 seconds.</p><p>Views are saved for this log directory. Appearance, experiment annotations, and saved group/filter definitions remain independent.</p></span></span>
+        <span id="named-view-status" role="status">Working copy</span>
+        <button class="button compact" data-action="update-named-view" id="update-named-view" disabled>Update view</button>
+        <button class="button compact" data-action="new-named-view" id="new-named-view">Save as new view</button>
+        <button class="button compact" data-action="revert-named-view" id="revert-named-view" disabled>Revert</button>
+        <button class="button compact" data-action="rename-named-view" id="rename-named-view" disabled>Rename view</button>
+        <button class="button compact" data-action="delete-named-view" id="delete-named-view" disabled>Delete view</button>
+        <label>Selection <select id="selection-mode" aria-label="Experiment selection mode"><option value="manual">Manual</option><option value="filters">Follow filters</option></select></label>
+        <span id="selection-mode-note" class="muted"></span>
+      </section>
       <section class="selection-bar" aria-label="Run selection"><div class="search-box"><span aria-hidden="true">⌕</span><input id="run-search" type="search" placeholder="Search experiments, tags, or config values…" aria-label="Search experiments"><kbd>/</kbd></div><div class="selection-count"><strong id="selected-count">0</strong> selected <span id="hidden-selection"></span></div><button class="text-button" data-action="select-visible">Select visible</button><button class="text-button" data-action="clear-selection">Clear</button></section>
       <div class="named-filter-bar" aria-label="Experiment filters">
         <button class="button compact" data-action="filters">⚑ Filters <span id="filter-count"></span></button><button class="button compact" id="clear-all-filters" data-action="clear-all-filters" hidden disabled>Clear all filters</button>
         <label>Named filter <select id="named-filter-choice" aria-label="Named experiment filter"></select></label>
-        <button class="button compact" id="apply-named-filter" data-action="apply-named-filter">Apply view</button>
         <button class="button compact" id="select-named-filter" data-action="select-named-filter" title="Replace selected experiments with matching unarchived runs">Select matching</button>
         <button class="button compact" id="edit-named-filter" data-action="edit-named-filter">Edit</button>
         <button class="text-button" data-action="new-named-filter">+ New named filter</button>
       </div>
+      <div id="outside-filter-selection" class="notice" role="status" hidden></div>
       <div id="selection-chips" class="selection-chips"></div>
       <section id="view" tabindex="-1" aria-label="Workspace content"><div class="empty"><div class="spinner"></div><h2>Opening your workspace</h2><p>Discovering experiment directories and YAML configurations.</p></div></section>
       <footer class="workspace-footer"><span>Read-only logs. Your annotations stay in a separate workspace file.</span><a href="/design" target="_blank" rel="noopener">Design document ↗</a></footer>

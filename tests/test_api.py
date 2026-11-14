@@ -37,6 +37,7 @@ def test_frontend_and_local_assets(client):
     assert 'aria-labelledby="panel-dialog-title"' in client.get("/").text
     assert client.get("/static/app.js").status_code == 200
     assert client.get("/static/panels.js").status_code == 200
+    assert client.get("/static/combined.js").status_code == 200
     assert client.get("/static/signals.js").status_code == 200
     assert client.get("/static/configurations.js").status_code == 200
     assert client.get("/static/appearance.js").status_code == 200
@@ -74,6 +75,61 @@ def test_refresh_preserves_cached_scalar_metadata(client):
     assert [run["metrics"] for run in after["experiments"]] == [
         run["metrics"] for run in before["experiments"]
     ]
+
+
+def test_refresh_revision_tracks_sources_without_counting_scan_or_cache_changes(
+    tmp_path, client_factory
+):
+    import os
+
+    from tensorboard.summary.writer.event_file_writer import EventFileWriter
+
+    from expman.app import create_app
+    from expman.demo import generate_demo
+
+    root = tmp_path / "logs"
+    generate_demo(root, count=1)
+    app = create_app(root, tmp_path / "state.json", tensorboard_loader="python")
+    with client_factory(app) as client:
+        workspace = client.get("/api/workspace").json()
+        revision = workspace["revision"]
+        assert revision
+        runs, identifiers = selected(client)
+        client.post("/api/metrics", json={"experiment_ids": identifiers})
+        response = client.post("/api/refresh").json()
+        assert response["revision"] == revision
+        assert response["last_scan"] > workspace["last_scan"]
+        (root / "broken").symlink_to(root / "missing")
+        response = client.post("/api/refresh").json()
+        assert response["revision"] == revision
+        assert len(response["warnings"]) == 1
+        client.patch("/api/experiments/" + identifiers[0], json={"name": "Renamed"})
+        response = client.post("/api/refresh").json()
+        assert response["revision"] == revision
+        assert response["experiments"][0]["name"] == "Renamed"
+        config = root / "exp000" / "config.yaml"
+        config.write_text(config.read_text() + "\nextra: true\n")
+        response = client.post("/api/refresh").json()
+        assert response["revision"] != revision
+        revision = response["revision"]
+        before = set((root / "exp000").glob("events.out.tfevents.*"))
+        EventFileWriter(str(root / "exp000")).close()
+        new_event = (set((root / "exp000").glob("events.out.tfevents.*")) - before).pop()
+        os.utime(new_event, (runs[0]["modified"], runs[0]["modified"]))
+        response = client.post("/api/refresh").json()
+        assert response["experiments"][0]["modified"] == runs[0]["modified"]
+        assert response["revision"] != revision
+        metrics = root / "exp000" / "evaluation_metrics.json"
+        metrics.write_text('{"metrics": {"score": 1}}')
+        assert (
+            client.put("/api/json-metrics", json={"paths": ["evaluation_metrics.json"]}).status_code
+            == 200
+        )
+        revision = client.post("/api/refresh").json()["revision"]
+        metrics.write_text('{"metrics": {"score": 12}}')
+        response = client.post("/api/refresh").json()
+        assert response["revision"] != revision
+        assert client.post("/api/refresh").json()["revision"] == response["revision"]
 
 
 def test_group_curves_match_independent_numpy_mean(client):
@@ -140,6 +196,39 @@ def test_groups_annotations_exclusions_and_exports(client):
     assert client.delete("/api/groups/" + group_id).status_code == 404
     assert client.get("/api/experiments/" + identifiers[0]).json()["name"] == "Reference"
     assert runs[0]["name"] != "Reference"
+
+
+def test_experiment_annotations_do_not_wait_for_metric_loading(client, monkeypatch):
+    runs, identifiers = selected(client)
+    repository = client.app.state.repository
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError(
+            "Experiment annotations must not load scalar histories or JSON metrics"
+        )
+
+    monkeypatch.setattr(repository, "load_metadata", forbidden)
+    monkeypatch.setattr(repository, "load", forbidden)
+    monkeypatch.setattr(repository.json_sources, "collect", forbidden)
+    path = "/api/experiments/" + identifiers[0]
+    details = client.get(path)
+    assert details.status_code == 200
+    assert details.json()["files"]
+    assert details.json()["config"] == runs[0]["config"]
+    annotation = {
+        "name": "Reference",
+        "starred": True,
+        "archived": True,
+        "tags": ["baseline"],
+        "notes": "Keep this run",
+    }
+    response = client.patch(path, json=annotation)
+    assert response.status_code == 200
+    for field, value in annotation.items():
+        assert response.json()[field] == client.get(path).json()[field] == value
+    assert client.patch(path, json={"starred": False, "archived": False}).status_code == 200
+    restored = client.get(path).json()
+    assert not restored["starred"] and not restored["archived"]
 
 
 def test_outcomes_events_and_periodicity(client):

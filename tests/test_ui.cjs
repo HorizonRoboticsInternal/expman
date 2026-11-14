@@ -45,7 +45,7 @@ const context = {
   console
 };
 vm.createContext(context);
-for (const filename of ["panels.js", "signals.js", "appearance.js", "filters.js", "configurations.js", "relationships.js"]) vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/expman/static/", filename), "utf8"), context);
+for (const filename of ["panels.js", "signals.js", "appearance.js", "filters.js", "configurations.js", "relationships.js", "views.js"]) vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/expman/static/", filename), "utf8"), context);
 let source = fs.readFileSync(path.join(__dirname, "../src/expman/static/app.js"), "utf8");
 source = source.replace(/  boot\(\)\.catch\(error => .*\);/, "  window.testApp = {state, renderOverview, renderTime, analyzeTime, pollTimeJob, cancelTime, renderEvents, renderPeriodicity, renderConfigTable, renderConfigs, renderAnalysis, renderCondition, renderParallel, renderView, setPanelSize, setPanelLogY, expandPanel, actions, selectionChanged, moveConfigRow, configurationRows, configScalarDialog, saveConfigScalar, updateConfigExclusions, pollConfigScalars, ensureConfigScalars, pollFullPanel, pollRelationships, cancelRelationships, relationshipRequest, loadJSONMetrics, pollJSONMetrics, drawCurvePanel, fullPanelKey};");
 vm.runInContext(source, context);

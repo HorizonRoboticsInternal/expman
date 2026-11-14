@@ -183,6 +183,11 @@ class ViewRequest(BaseModel):
     view: dict = Field(default_factory=dict)
 
 
+class NamedViewRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    view: dict | None = None
+
+
 class AppearanceSettings(BaseModel):
     font_family: Literal["system", "arial", "georgia", "monospace"] = "system"
     font_size: int = Field(default=13, ge=10, le=22)
@@ -402,6 +407,7 @@ def create_app(
             "logdir": str(repository.root),
             "id": repository.workspace_id,
             "last_scan": repository.last_scan,
+            "revision": repository.revision,
             "warnings": repository.warnings,
             "state_file": str(store.path.absolute()),
             "user_data_dir": str(user_dir),
@@ -420,6 +426,95 @@ def create_app(
         if len(json.dumps(update.view, allow_nan=False).encode("utf-8")) > 1024 * 1024:
             raise ValueError("Workspace view must not exceed 1 MiB")
         return store.update(lambda state: state.update(view=update.view))["view"]
+
+    @app.get("/api/named-views")
+    def named_views():
+        return store.read()["named_views"]
+
+    def write_named_view(update, identifier=None):
+        name = update.name.strip()
+        if not name:
+            raise ValueError("Give the view a name")
+        snapshot = None
+        if update.view is not None:
+            if len(json.dumps(update.view, allow_nan=False).encode("utf-8")) > 1024 * 1024:
+                raise ValueError("Named view must not exceed 1 MiB")
+            snapshot = {key: value for key, value in update.view.items() if key != "namedView"}
+            if snapshot.get("selectionMode") == "filters":
+                snapshot["selected"] = []
+            if "configurationExclusions" in snapshot:
+                IgnoreRequest.model_validate(snapshot["configurationExclusions"])
+        saved_id = identifier or uuid.uuid4().hex[:16]
+
+        def mutate(state):
+            views = state["named_views"]
+            previous = next((item for item in views if item["id"] == saved_id), None)
+            if identifier and previous is None:
+                raise KeyError(f"Unknown named view: {identifier}")
+            if any(
+                item["id"] != saved_id and item["name"].casefold() == name.casefold()
+                for item in views
+            ):
+                raise HTTPException(409, "A view with that name already exists")
+            if previous is None and len(views) >= 100:
+                raise ValueError("A workspace can contain up to 100 named views")
+            if previous is None and snapshot is None:
+                raise ValueError("Settings are required for a new named view")
+            definition = {
+                "id": saved_id,
+                "name": name,
+                "view": snapshot if snapshot is not None else previous["view"],
+            }
+            state["named_views"] = (
+                [definition if item["id"] == saved_id else item for item in views]
+                if previous
+                else [*views, definition]
+            )
+            if update.view is not None:
+                state["view"] = {**update.view, "namedView": saved_id}
+
+        saved = store.update(mutate)
+        return next(item for item in saved["named_views"] if item["id"] == saved_id)
+
+    @app.post("/api/named-views", status_code=201)
+    def create_named_view(update: NamedViewRequest):
+        return write_named_view(update)
+
+    @app.put("/api/named-views/{identifier}")
+    def update_named_view(identifier: str, update: NamedViewRequest):
+        return write_named_view(update, identifier)
+
+    @app.post("/api/named-views/{identifier}/load")
+    def load_named_view(identifier: str):
+        definition = next(
+            (item for item in store.read()["named_views"] if item["id"] == identifier), None
+        )
+        if definition is None:
+            raise KeyError(f"Unknown named view: {identifier}")
+        if definition["view"].get("selectionMode") == "filters":
+            repository.scan()
+
+        def mutate(state):
+            state["view"] = {**definition["view"], "namedView": identifier}
+            exclusions = definition["view"].get("configurationExclusions")
+            if exclusions is not None:
+                validated = IgnoreRequest.model_validate(exclusions)
+                state.update(ignored_configs=validated.patterns, ignored_files=validated.files)
+
+        return store.update(mutate)["view"]
+
+    @app.delete("/api/named-views/{identifier}")
+    def delete_named_view(identifier: str):
+        def mutate(state):
+            if not any(item["id"] == identifier for item in state["named_views"]):
+                raise KeyError(f"Unknown named view: {identifier}")
+            state["named_views"] = [
+                item for item in state["named_views"] if item["id"] != identifier
+            ]
+            if state["view"].get("namedView") == identifier:
+                state["view"]["namedView"] = ""
+
+        return store.update(mutate)["named_views"]
 
     @app.get("/api/settings")
     def settings():
@@ -504,6 +599,7 @@ def create_app(
             "experiments": descriptions(repository.scan()),
             "warnings": repository.warnings,
             "last_scan": repository.last_scan,
+            "revision": repository.revision,
         }
 
     @app.post("/api/metrics")
@@ -600,16 +696,17 @@ def create_app(
     @app.get("/api/experiments/{experiment_id}")
     def experiment(experiment_id: str):
         item = repository.get(experiment_id)
-        return {**descriptions([item], load=True)[0], "files": item.config_files}
+        annotation = store.read()["experiments"].get(item.id, {})
+        return {**repository.describe(item, annotation), "files": item.config_files}
 
     @app.patch("/api/experiments/{experiment_id}")
     def annotate(experiment_id: str, annotation: AnnotationRequest):
-        repository.get(experiment_id)
+        item = repository.get(experiment_id)
         changes = annotation.model_dump(exclude_none=True)
-        store.update(
+        saved = store.update(
             lambda state: state["experiments"].setdefault(experiment_id, {}).update(changes)
         )
-        return descriptions([repository.get(experiment_id)])[0]
+        return repository.describe(item, saved["experiments"][experiment_id])
 
     @app.post("/api/compare")
     def compare_configs(selection: CompareRequest):
@@ -752,8 +849,10 @@ def create_app(
     @app.post("/api/curves/all/jobs", status_code=202)
     def start_full_curve(selection: CurveRequest):
         selected = repository.select(selection.experiment_ids)
-        if not selected or len(selection.tags) != 1:
-            raise ValueError("Select experiments and one panel to load all values")
+        if not selected or not selection.tags:
+            raise ValueError("Select experiments and at least one metric to load all values")
+        if len(selection.tags) > 1 and len(selected) != 1:
+            raise ValueError("Select one experiment to load all values for multiple metrics")
         source = Experiment(
             id="all-values",
             path=repository.root,
