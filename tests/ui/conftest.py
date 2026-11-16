@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 import uvicorn
+import yaml
 from tensorboard.compat.proto import event_pb2, summary_pb2
 from tensorboard.summary.writer.event_file_writer import EventFileWriter
 
@@ -28,10 +29,18 @@ def build_ui_app(root, scenario="basic"):
         for path in (logdir / "exp000").glob("events.out.tfevents.*"):
             path.unlink()
         EventFileWriter(str(logdir / "exp000")).close()
-    if scenario == "annotations":
+    if scenario in {"annotations", "json-refresh"}:
         (logdir / "exp000" / "evaluation_metrics.json").write_text(
             json.dumps({"metrics": {"score": 0.95}})
         )
+    if scenario == "config-search":
+        for index in range(4):
+            path = logdir / f"exp{index:03}" / "config.yaml"
+            config = yaml.safe_load(path.read_text())
+            config["env"] = {"config": {"terrain": {"generator": {"seed": [1, 2, 3, 42][index]}}}}
+            config["constant"] = {"marker": "identical"}
+            config["search_padding"] = {f"field_{field:03}": field + index for field in range(160)}
+            path.write_text(yaml.safe_dump(config))
     if scenario in {"stress", "sections"}:
         writer = EventFileWriter(str(logdir / "exp000"))
         try:
@@ -106,7 +115,21 @@ def build_ui_app(root, scenario="basic"):
         }
     if scenario == "refresh":
         view["selectionMode"] = "filters"
+    if scenario == "json-refresh":
+        view["configScalars"] = [
+            {"id": "evaluation-score", "tag": "JSON/evaluation_metrics/score", "mode": "latest"}
+        ]
+    if scenario == "config-search":
+        view.update(
+            selectionMode="filters",
+            query="env.config.terrain.generator.seed",
+            configOrder=[f"config:search_padding.field_{field:03}" for field in range(160)],
+        )
     app.state.store.update(lambda state: state.update(view=view, groups=groups))
+    if scenario == "config-search":
+        app.state.store.update(
+            lambda state: state.update(ignored_configs=["env.config.terrain.generator.seed"])
+        )
     return app
 
 

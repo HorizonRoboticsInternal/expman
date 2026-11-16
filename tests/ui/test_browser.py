@@ -1,5 +1,7 @@
 """Exercise bundled Plotly and native scalar loading through actual browser controls."""
 
+import csv
+import os
 import re
 import statistics
 import time
@@ -70,6 +72,17 @@ def saved_view(response, predicate):
 def change_number(locator, value):
     locator.fill(str(value))
     locator.press("Tab")
+
+
+def enable_fast_auto_refresh(page):
+    page.evaluate("""() => {
+      const interval = window.setInterval.bind(window);
+      window.setInterval = (callback, delay, ...args) =>
+        interval(callback, delay === 30000 ? 500 : delay, ...args);
+    }""")
+    with page.expect_response("**/api/settings") as response:
+        page.locator("#auto-refresh").check()
+    assert response.value.ok
 
 
 def combined_drag_point(page, tag, index):
@@ -567,9 +580,10 @@ def test_combined_load_all_keeps_dense_sparse_values_and_rejects_stale_samples(u
     assert_complete()
     assert not requests, "Full-value scaling and smoothing must reuse the complete observations"
     page.locator("#x-axis").select_option("relative")
-    page.wait_for_function(
-        "document.getElementById('combined-chart').layout.xaxis.title.text === 'Elapsed seconds'"
-    )
+    page.wait_for_function("""() => {
+      const plot = document.getElementById('combined-chart');
+      return plot && plot.layout && plot.layout.xaxis.title.text === 'Elapsed seconds';
+    }""")
     assert_complete(axis_scale=10)
     assert not any(url.endswith("/api/curves/all/jobs") for url in requests)
     page.locator('#navigation [data-action="tab"][data-value="runs"]').click()
@@ -632,14 +646,20 @@ def test_restored_combined_plot_recovers_when_indexed_observations_arrive(
         pytest.fail("The native reader did not index the new events")
     app.state.ui_metadata_gate.set()
     wait_for_overview(page)
-    page.wait_for_function("document.getElementById('combined-chart')._fullData.length === 2")
+    page.wait_for_function("""() => {
+      const plot = document.getElementById('combined-chart');
+      return plot && plot._fullData && plot._fullData.length === 2;
+    }""")
     expect(page.locator("#combined-status")).not_to_contain_text("No observations")
     assert page.locator("#combined-chart").evaluate(
         "plot => plot.data.map(trace => trace.x.length)"
     ) == [21, 21]
     page.reload()
     wait_for_overview(page)
-    page.wait_for_function("document.getElementById('combined-chart')._fullData.length === 2")
+    page.wait_for_function("""() => {
+      const plot = document.getElementById('combined-chart');
+      return plot && plot._fullData && plot._fullData.length === 2;
+    }""")
     assert page.locator("#combined-chart").evaluate(
         "plot => plot.data.map(trace => trace.x.length)"
     ) == [21, 21]
@@ -885,6 +905,16 @@ def test_combined_fit_y_and_vertical_curve_movement(ui_page):
 @pytest.mark.ui_scenario("refresh")
 def test_background_refresh_preserves_charts_and_only_announces_new_warnings(ui_page, tmp_path):
     page = ui_page
+    page.add_init_script("""(() => {
+      const interval = window.setInterval.bind(window);
+      window.setInterval = (callback, delay, ...args) => {
+        if (delay === 30000) window.__expmanRefreshTick = callback;
+        return interval(callback, delay, ...args);
+      };
+    })();""")
+    page.reload()
+    wait_for_overview(page)
+    page.wait_for_function("typeof window.__expmanRefreshTick === 'function'")
     page.get_by_role("button", name="Load all values", exact=True).first.click()
     full_values = page.locator('[data-full-panel="train/loss"]')
     expect(full_values).to_have_text("All values loaded", timeout=60_000)
@@ -902,11 +932,10 @@ def test_background_refresh_preserves_charts_and_only_announces_new_warnings(ui_
             else None
         ),
     )
-    page.clock.install()
 
     def refresh_after_interval():
         with page.expect_response("**/api/refresh") as response:
-            page.clock.fast_forward(30_100)
+            page.evaluate("window.__expmanRefreshTick()")
         assert response.value.ok
 
     refresh_after_interval()
@@ -914,8 +943,7 @@ def test_background_refresh_preserves_charts_and_only_announces_new_warnings(ui_
     expect(toast).to_contain_text("9 discovery warnings")
     expect(toast).to_contain_text("How this workspace works ↗")
     expect(toast).to_contain_text("at the bottom of the left sidebar")
-    page.clock.fast_forward(4_100)
-    expect(toast).not_to_be_visible()
+    expect(toast).not_to_be_visible(timeout=10_000)
     refresh_after_interval()
     expect(toast).not_to_be_visible()
     expect(full_values).to_have_text("All values loaded")
@@ -923,6 +951,21 @@ def test_background_refresh_preserves_charts_and_only_announces_new_warnings(ui_
       plot === window.__retainedChart && plot.data === window.__retainedData &&
       plot.layout.xaxis.range[0] === 100 && plot.layout.xaxis.range[1] === 160
     """)
+    assert not calls
+    writer = EventFileWriter(str(tmp_path / "logs" / "exp000"))
+    writer.add_event(
+        event_pb2.Event(
+            step=400,
+            wall_time=1_790_004_000,
+            summary=summary_pb2.Summary(
+                value=[summary_pb2.Summary.Value(tag="train/loss", simple_value=0.1)]
+            ),
+        )
+    )
+    writer.close()
+    refresh_after_interval()
+    expect(full_values).to_have_text("All values loaded")
+    assert page.locator("#curve-0").evaluate("plot => plot === window.__retainedChart")
     assert not calls
     (tmp_path / "logs" / "broken-9").symlink_to(tmp_path / "missing-9")
     refresh_after_interval()
@@ -935,7 +978,7 @@ def test_background_refresh_preserves_charts_and_only_announces_new_warnings(ui_
     source = tmp_path / "new"
     generate_demo(source, count=1)
     (source / "exp000").rename(tmp_path / "logs" / "exp004")
-    page.clock.fast_forward(30_100)
+    page.evaluate("window.__expmanRefreshTick()")
     expect(dialog).to_be_visible()
     expect(page.locator("#selected-count")).to_have_text("4")
     dialog.get_by_role("button", name="Close", exact=True).click()
@@ -944,6 +987,73 @@ def test_background_refresh_preserves_charts_and_only_announces_new_warnings(ui_
     wait_for_overview(page)
     assert calls
     expect(toast).not_to_be_visible()
+    calls.clear()
+    with page.expect_response("**/api/settings") as response:
+        page.locator("#auto-refresh").check()
+    assert response.value.ok
+    writer = EventFileWriter(str(tmp_path / "logs" / "exp000"))
+    writer.add_event(
+        event_pb2.Event(
+            step=401,
+            wall_time=1_790_004_010,
+            summary=summary_pb2.Summary(
+                value=[summary_pb2.Summary.Value(tag="train/loss", simple_value=0.09)]
+            ),
+        )
+    )
+    writer.close()
+    refresh_after_interval()
+    wait_for_overview(page)
+    assert calls
+
+
+@pytest.mark.ui_scenario("json-refresh")
+def test_json_summary_refresh_recovers_preserved_timestamp_updates(ui_page, tmp_path):
+    page = ui_page
+    page.locator('#navigation [data-action="tab"][data-value="configs"]').click()
+    table = page.locator("#config-table")
+    cell = table.locator("tbody tr").first.locator(
+        'td[data-config-field="scalar:evaluation-score"]'
+    )
+    expect(cell).to_have_text("0.95")
+    path = tmp_path / "logs" / "exp000" / "evaluation_metrics.json"
+    before = path.stat()
+
+    def replace_contents(document):
+        previous = path.stat()
+        path.write_text(document)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = path.stat()
+        assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        assert after.st_ctime_ns != previous.st_ctime_ns
+
+    def refresh():
+        with page.expect_response("**/api/refresh") as response:
+            page.locator('[data-action="refresh"]').click()
+        assert response.value.ok
+
+    replace_contents('x"metrics": {"score": 0.95}}')
+    refresh()
+    expect(cell).to_have_text("")
+    status = page.request.get(page.url + "api/json-metrics").json()
+    assert any("exp000/evaluation_metrics.json" in error for error in status["errors"])
+    replace_contents('{"metrics": {"score": 0.85}}')
+    refresh()
+    expect(cell).to_have_text("0.85")
+    assert not page.request.get(page.url + "api/json-metrics").json()["errors"]
+    enable_fast_auto_refresh(page)
+    replace_contents('{"metrics": {"score": 0.75}}')
+    expect(cell).to_have_text("0.75")
+    revision = page.request.get(page.url + "api/workspace").json()["revision"]
+    with page.expect_response("**/api/refresh") as response:
+        pass
+    assert response.value.ok
+    assert response.value.json()["revision"] == revision
+    expect(cell).to_have_text("0.75")
 
 
 def test_named_views_explicit_updates_and_following_new_experiments(ui_page, tmp_path):
@@ -1106,6 +1216,254 @@ def test_experiment_filters_apply_live_and_disclose_selection_outside_filters(ui
     dialog.get_by_role("button", name="Done", exact=True).click()
     expect(dialog).not_to_be_visible()
     expect(rows).to_have_count(4)
+
+
+def test_configuration_baseline_preserves_order_and_highlights(ui_page, tmp_path):
+    page = ui_page
+    page.locator('#navigation [data-action="tab"][data-value="runs"]').click()
+    order = page.locator(".experiment-table input[data-select-run]").evaluate_all(
+        "inputs => inputs.map(input => input.dataset.selectRun)"
+    )
+    page.locator('#navigation [data-action="tab"][data-value="configs"]').click()
+    table = page.locator("#config-table")
+    expect(table).to_be_visible()
+
+    def row_order():
+        return table.locator("tbody tr[data-experiment-id]").evaluate_all(
+            "rows => rows.map(row => row.dataset.experimentId)"
+        )
+
+    page.locator("#baseline").select_option(order[-1])
+    baseline = table.locator(f'tr[data-experiment-id="{order[-1]}"]')
+    expect(baseline.locator("th .tag")).to_have_text("BASELINE")
+    assert row_order() == order
+    for identifier in order:
+        cell = table.locator(f'tr[data-experiment-id="{identifier}"]').locator(
+            'td[data-config-field="config:model.architecture"]'
+        )
+        if identifier == order[-1]:
+            expect(cell).not_to_have_class(re.compile(r"\bchanged\b"))
+        else:
+            expect(cell).to_have_class(re.compile(r"\bchanged\b"))
+    with page.expect_response(
+        lambda response: saved_view(response, lambda view: view.get("baseline") == order[2])
+    ):
+        page.locator("#baseline").select_option(order[2])
+    expect(table.locator(f'tr[data-experiment-id="{order[2]}"] th .tag')).to_have_text("BASELINE")
+    assert row_order() == order
+    expect(
+        table.locator(
+            f'tr[data-experiment-id="{order[0]}"] td[data-config-field="config:model.architecture"]'
+        )
+    ).not_to_have_class(re.compile(r"\bchanged\b"))
+    page.locator('#navigation [data-action="tab"][data-value="runs"]').click()
+    page.locator("#run-sort").select_option("updated")
+    sorted_order = page.locator(".experiment-table input[data-select-run]").evaluate_all(
+        "inputs => inputs.map(input => input.dataset.selectRun)"
+    )
+    with page.expect_response(
+        lambda response: saved_view(
+            response, lambda view: view.get("tab") == "configs" and view.get("sort") == "updated"
+        )
+    ):
+        page.locator('#navigation [data-action="tab"][data-value="configs"]').click()
+    expect(table).to_be_visible()
+    assert row_order() == sorted_order
+    expect(table.locator(f'tr[data-experiment-id="{order[2]}"] th .tag')).to_have_text("BASELINE")
+    with page.expect_download() as downloaded:
+        page.get_by_role("button", name="Export CSV ↓", exact=True).click()
+    path = tmp_path / "comparison.csv"
+    downloaded.value.save_as(path)
+    with path.open(newline="") as stream:
+        records = list(csv.reader(stream))
+    names = {
+        run["id"]: run["name"]
+        for run in page.request.get(page.url.rstrip("/") + "/api/experiments").json()["experiments"]
+    }
+    assert [record[0] for record in records[1:]] == [
+        names[identifier] for identifier in sorted_order
+    ]
+    page.reload()
+    expect(table).to_be_visible()
+    assert row_order() == sorted_order
+    expect(table.locator(f'tr[data-experiment-id="{order[2]}"] th .tag')).to_have_text("BASELINE")
+
+
+@pytest.mark.ui_scenario("config-search")
+def test_enter_includes_configuration_path_and_persists_in_named_view(ui_page):
+    page = ui_page
+    key = "env.config.terrain.generator.seed"
+    page.locator('#navigation [data-action="tab"][data-value="runs"]').click()
+    experiment_search = page.locator("#run-search")
+    placeholder = experiment_search.get_attribute("placeholder")
+    page.locator('#navigation [data-action="tab"][data-value="configs"]').click()
+    expect(page.locator("#config-table")).to_be_visible()
+    expect(experiment_search).to_have_attribute("placeholder", placeholder)
+    inclusion_requests = []
+    page.on(
+        "request",
+        lambda request: (
+            inclusion_requests.append(request.url)
+            if urlsplit(request.url).path == "/api/ignored-configs" and request.method == "PUT"
+            else None
+        ),
+    )
+    experiment_search.press("Enter")
+    expect(page.locator("#config-search")).to_have_value("")
+    assert not inclusion_requests
+    workspace = page.request.get(page.url.rstrip("/") + "/api/workspace").json()
+    assert key in workspace["state"]["ignored_configs"]
+    selected = page.locator("#selected-count").inner_text()
+    page.get_by_role("button", name="Save as new view", exact=True).click()
+    dialog = page.locator("#dialog")
+    dialog.get_by_label("View name", exact=True).fill("Seed comparison")
+    dialog.get_by_role("button", name="Save", exact=True).click()
+    expect(page.locator("#named-view-status")).to_have_text("Saved")
+    header = page.locator('th[data-config-key="config:' + key + '"]')
+    checkbox = header.locator("input[data-config-include]")
+    pending = []
+
+    def hold_comparison(route):
+        pending.append((route, route.fetch()))
+
+    page.locator("#config-search").fill(key)
+    page.route("**/api/compare", hold_comparison)
+    try:
+        with (
+            page.expect_response("**/api/ignored-configs") as result,
+            page.expect_response(
+                lambda response: saved_view(
+                    response,
+                    lambda view: (
+                        view.get("configQuery") == key
+                        and key not in view["configurationExclusions"]["patterns"]
+                    ),
+                )
+            ),
+        ):
+            page.locator("#config-search").press("Enter")
+        assert key not in result.value.json()["ignored_configs"]
+        expect(header).to_have_count(1)
+        expect(checkbox).to_be_checked()
+        deadline = time.monotonic() + 10
+        while not pending:
+            assert time.monotonic() < deadline, "The inclusion comparison did not start"
+            page.wait_for_timeout(20)
+    finally:
+        for route, response in pending:
+            route.fulfill(response=response)
+        page.unroute("**/api/compare", hold_comparison)
+    expect(page.locator("#config-search")).to_have_value(key)
+    expect(page.locator("#selected-count")).to_have_text(selected)
+    expect(page.locator("#show-ignored")).not_to_be_checked()
+    expect(page.locator("#named-view-status")).to_have_text("Modified")
+    page.get_by_role("button", name="Update view", exact=True).click()
+    expect(page.locator("#named-view-status")).to_have_text("Saved")
+    page.reload()
+    expect(checkbox).to_be_checked()
+    expect(page.locator("#named-view-status")).to_have_text("Saved")
+    with page.expect_response("**/api/ignored-configs"):
+        checkbox.uncheck()
+    expect(header).to_have_count(0)
+    expect(page.locator("#named-view-status")).to_have_text("Modified")
+    page.get_by_role("button", name="Revert", exact=True).click()
+    expect(checkbox).to_be_checked()
+    expect(page.locator("#named-view-status")).to_have_text("Saved")
+    with page.expect_response("**/api/ignored-configs"):
+        checkbox.uncheck()
+    expect(header).to_have_count(0)
+    search = page.locator("#config-search")
+    search.fill("  " + key + "  ")
+    with page.expect_response("**/api/ignored-configs") as result:
+        search.press("Enter")
+    assert key not in result.value.json()["ignored_configs"]
+    expect(checkbox).to_be_checked()
+    expect(search).to_have_value(key)
+    expect(page.locator("#selected-count")).to_have_text(selected)
+
+
+@pytest.mark.ui_scenario("config-search")
+def test_configuration_search_reveals_ignored_and_identical_fields_without_including_them(ui_page):
+    page = ui_page
+    key = "env.config.terrain.generator.seed"
+    page.locator('#navigation [data-action="tab"][data-value="configs"]').click()
+    table = page.locator("#config-table")
+    expect(table).to_be_visible()
+    selected = page.locator("#selected-count").inner_text()
+    for _ in range(3):
+        page.get_by_role("button", name="Next →", exact=True).click()
+    expect(page.locator(".table-footer")).to_contain_text("Fields page 4")
+    search = page.get_by_role("searchbox", name="Search configuration paths or scalar metrics")
+    search.fill("  " + key + "  ")
+    expect(page.locator(".table-footer")).to_contain_text("Fields page 1")
+    expect(table.locator("th[data-config-key]")).to_have_count(0)
+    expect(page.locator("#config-search-notice")).to_contain_text(
+        "Search excludes ignored and identical configurations."
+    )
+    page.get_by_role("button", name="Search all fields", exact=True).click()
+    column = table.locator('th[data-config-key="config:' + key + '"]')
+    expect(column).to_have_count(1)
+    expect(column.locator("input[data-config-include]")).not_to_be_checked()
+    expect(page.locator("#show-ignored")).to_be_checked()
+    expect(page.locator("#diff-only")).not_to_be_checked()
+    expect(search).to_have_value("  " + key + "  ")
+    expect(page.locator("#run-search")).to_have_value(key)
+    expect(page.locator("#selected-count")).to_have_text(selected)
+    expect(page.locator("#selection-mode")).to_have_value("filters")
+    workspace = page.request.get(page.url.rstrip("/") + "/api/workspace").json()
+    assert workspace["state"]["ignored_configs"] == [key]
+    assert table.locator('td[data-config-field="config:' + key + '"]').all_text_contents() == [
+        "1",
+        "2",
+        "3",
+        "42",
+    ]
+    search.fill("")
+    page.locator("#diff-only").check()
+    expect(table).to_be_visible()
+    search.fill("constant.marker")
+    expect(table.locator("th[data-config-key]")).to_have_count(0)
+    expect(page.locator("#config-search-notice")).to_contain_text(
+        "Search excludes identical configurations."
+    )
+    page.get_by_role("button", name="Search all fields", exact=True).click()
+    expect(table.locator('th[data-config-key="config:constant.marker"]')).to_have_count(1)
+    search.fill("no.such.configuration")
+    expect(page.get_by_role("heading", name="No matching comparison fields")).to_be_visible()
+    expect(page.locator("#config-search-notice")).to_have_count(0)
+    expect(page.locator("#view")).to_contain_text(
+        "No configuration paths or scalar specifications match this search."
+    )
+    search.fill("")
+    pending = []
+
+    def delay_comparison(route):
+        pending.append((route, route.fetch()))
+
+    page.route("**/api/compare", delay_comparison)
+    page.locator("#diff-only").check()
+    deadline = time.monotonic() + 10
+    while not pending:
+        assert time.monotonic() < deadline, "The comparison reload did not start"
+        page.wait_for_timeout(20)
+    try:
+        expect(search).to_be_visible()
+        search.focus()
+        page.keyboard.type("env.config.terrain.")
+        page.evaluate("window.__previousConfigSearch = document.getElementById('config-search')")
+    finally:
+        route, response = pending.pop()
+        route.fulfill(response=response)
+    page.wait_for_function("""() => {
+      const search = document.getElementById('config-search');
+      return search && search !== window.__previousConfigSearch;
+    }""")
+    expect(search).to_be_focused()
+    page.keyboard.type("generator.seed")
+    expect(search).to_have_value(key)
+    expect(table.locator('th[data-config-key="config:' + key + '"]')).to_have_count(1)
+    expect(page.locator("#selected-count")).to_have_text(selected)
+    page.unroute("**/api/compare", delay_comparison)
 
 
 def test_experiments_configurations_relationships_and_time_series(ui_page):

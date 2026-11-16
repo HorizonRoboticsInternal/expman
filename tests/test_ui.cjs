@@ -511,9 +511,14 @@ async function configurationWorkflows() {
   assert(configCellMarkup("a", "scalar:loss").includes('class="mono scalar-highlight"'));
   assert(configCellMarkup("a", "scalar:loss").includes('title="number: 2"'));
   await documentHandlers.change({target: {id: "baseline", value: "b", dataset: {}, closest: () => null}});
-  assert.equal(state.comparison.experiments[0].id, "b");
+  assert.deepEqual(Array.from(state.comparison.experiments).map(item => item.id), ["a", "b"]);
   assert.equal(state.pendingView.baseline, "b");
-  assert.equal(state.comparison.rows.find(row => row.kind === "scalar").cells[0].value, 5);
+  assert(!experimentMarkup("a").includes("BASELINE"));
+  assert(experimentMarkup("b").includes("BASELINE"));
+  assert(configCellMarkup("a", "config:model.name").includes("changed"));
+  assert(!configCellMarkup("b", "config:model.name").includes("changed"));
+  assert.equal(state.comparison.rows.find(row => row.kind === "scalar").cells[0].value, 2);
+  assert.equal(state.comparison.rows.find(row => row.kind === "scalar").cells[1].value, 5);
   const beforeIgnore = requests.length;
   await documentHandlers.change({target: {id: "", dataset: {configInclude: "seed"}, checked: false}});
   assert(!elements.get("view").innerHTML.includes('data-config-include="seed"'));
@@ -1679,12 +1684,16 @@ function transposedConfigRegressions() {
     const fields = Array.from({length: 55}, (unused, field) => ({key: "very.long.configuration.path.value" + field, kind: "config", different: true, ignored: false, cells: experiments.map((item, index) => ({present: true, value: index + field}))}));
     Object.assign(state, {workspace: {settings: {appearance: {}}, state: {ignored_configs: [], ignored_files: []}},
       comparison: {experiments, rows: fields}, selected: new Set(experiments.map(item => item.id)), baseline: "e60",
-      configPage: 0, configQuery: "", configFullNames: false, configOrder: [], configColumnWidths: {}, configResizing: null, diffOnly: false, showIgnored: false});
+      configPage: 0, configQuery: "", configFullNames: false, configOrder: [], configColumnWidths: {}, configResizing: null, diffOnly: false, showIgnored: false, sort: "name"});
     app.renderConfigTable();
     let html = element("view").innerHTML;
     assert.equal(Array.from(html.matchAll(/<tr data-experiment-id=/g)).length, 61);
     assert.equal(Array.from(html.matchAll(/data-config-heading=/g)).length, 51);
-    assert(html.indexOf('data-experiment-id="e60"') < html.indexOf('data-experiment-id="e0"'));
+    assert.deepEqual(Array.from(html.matchAll(/<tr data-experiment-id="([^"]+)"/g), item => item[1]), experiments.map(item => item.id));
+    assert(experimentMarkup("e60").includes("BASELINE"));
+    assert(!experimentMarkup("e0").includes("BASELINE"));
+    assert(configCellMarkup("e0", "config:" + fields[0].key).includes("changed"));
+    assert(!configCellMarkup("e60", "config:" + fields[0].key).includes("changed"));
     assert(configCellMarkup("e60", "config:" + fields[0].key).includes('>60</td>'));
     const sizes = JSON.stringify(state.configAutoWidths);
     state.configFullNames = true; app.renderConfigTable();
@@ -1697,8 +1706,10 @@ function transposedConfigRegressions() {
     const records = context.window.ExpmanConfigurations.comparisonRecords(state.comparison, app.configurationRows(), (field, cell) => cell.present ? String(cell.value) : "");
     assert.equal(records.length, 62);
     assert.equal(records[0].length, 56);
-    assert.equal(records[1][0], "Experiment 60");
-    assert.equal(records[1][1], "60");
+    assert.equal(records[1][0], "Experiment 0");
+    assert.equal(records[1][1], "0");
+    assert.equal(records[61][0], "Experiment 60");
+    assert.equal(records[61][1], "60");
   } finally { Object.assign(state, previous); }
 }
 

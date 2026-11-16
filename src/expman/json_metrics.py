@@ -116,6 +116,7 @@ class JSONMetrics:
                     status.st_ino,
                     status.st_mtime_ns,
                     status.st_size,
+                    status.st_ctime_ns,
                     signature,
                     implicit,
                 )

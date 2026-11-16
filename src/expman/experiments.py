@@ -154,7 +154,14 @@ class ExperimentRepository:
                 try:
                     status = path.stat()
                     sources.append(
-                        ("json", str(path), status.st_ino, status.st_mtime_ns, status.st_size)
+                        (
+                            "json",
+                            str(path),
+                            status.st_ino,
+                            status.st_mtime_ns,
+                            status.st_size,
+                            status.st_ctime_ns,
+                        )
                     )
                 except OSError:
                     continue

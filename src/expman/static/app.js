@@ -1282,11 +1282,21 @@
     } catch (error) { if (state.fullPanels[tag] === item) { item.error = errorText(error); notify(item.error, true); updateFullPanelControl(tag); } }
   }
 
+  function orderedExperiments(runs) {
+    const score = item => (item.metrics || {})[state.metric] ? item.metrics[state.metric].last : null;
+    return runs.slice().sort((first, second) => state.sort === "updated" ? second.modified - first.modified : state.sort === "result" ? (score(second) == null ? -Infinity : score(second)) - (score(first) == null ? -Infinity : score(first)) : first.name.localeCompare(second.name, undefined, {numeric: true}));
+  }
+
+  function configurationExperimentIds() {
+    const runs = new Map(state.runs.map(item => [item.id, item]));
+    const compared = new Map((state.comparison ? state.comparison.experiments : []).map(item => [item.id, item]));
+    return orderedExperiments(ids().map(id => runs.get(id) || compared.get(id) || {id, name: id})).map(item => item.id);
+  }
+
   function renderRuns() {
     prepareExperimentColors();
-    const runs = visibleRuns().slice();
+    const runs = orderedExperiments(visibleRuns());
     const score = item => item.metrics[state.metric] ? item.metrics[state.metric].last : null;
-    runs.sort((first, second) => state.sort === "updated" ? second.modified - first.modified : state.sort === "result" ? (score(second) == null ? -Infinity : score(second)) - (score(first) == null ? -Infinity : score(first)) : first.name.localeCompare(second.name, undefined, {numeric: true}));
     const baseline = state.runs.find(item => item.id === state.baseline), baselineValue = baseline ? score(baseline) : null;
     byId("view").innerHTML = `<div class="toolbar"><strong>${runs.length} experiments</strong><label>Result <select id="result-metric">${metricOptions(state.metric)}</select></label><label>Sort <select id="run-sort">${[["name", "Name"], ["updated", "Last updated"], ["result", "Result · descending"]].map(([key, text]) => option(key, text, state.sort)).join("")}</select></label><button class="button compact" data-action="columns">Columns</button><button class="button compact push" data-action="index-visible">Load visible summaries</button></div><div class="card"><div class="table-wrap"><table class="experiment-table"><thead><tr><th><input type="checkbox" id="toggle-visible" aria-label="Select all visible experiments" ${runs.length && runs.every(item => state.selected.has(item.id)) ? "checked" : ""}></th><th></th><th>EXPERIMENT</th><th>LAST RESULT</th><th>Δ VS BASELINE</th><th>LAST STEP</th>${state.columns.map(key => `<th title="${escape(key)}">${escape(key)}</th>`).join("")}<th>TAGS</th><th>UPDATED</th></tr></thead><tbody>${runs.map(item => {
       const value = score(item), delta = value == null || baselineValue == null ? null : value - baselineValue;
@@ -1295,14 +1305,15 @@
   }
 
   async function renderConfigs(serial) {
+    const searchFocus = configSearchFocus();
     rememberConfigScroll(); disconnectConfigScrolling();
     const request = ++state.configCompareRequest;
-    byId("view").innerHTML = loading("Comparing configuration values…");
+    if (!byId("config-table")) byId("view").innerHTML = loading("Comparing configuration values…");
     if (!state.selected.has(state.baseline)) state.baseline = ids()[0] || "";
-    const ordered = [state.baseline].concat(ids().filter(identifier => identifier !== state.baseline)).filter(identifier => state.selected.has(identifier));
+    const ordered = configurationExperimentIds();
     const result = await api("/api/compare", {experiment_ids: ordered, differences_only: state.diffOnly, show_ignored: state.showIgnored, scalar_rows: []}, undefined, state.viewController && state.viewController.signal);
     if (serial !== state.serial || state.tab !== "configs" || request !== state.configCompareRequest) return;
-    state.comparison = result; insertScalarRows(); renderConfigTable();
+    state.comparison = result; insertScalarRows(); renderConfigTable(searchFocus);
     execute(ensureConfigScalars);
   }
 
@@ -1375,7 +1386,7 @@
     return window.ExpmanConfigurations.orderedRows(state.comparison ? state.comparison.rows : [], state.configOrder)
       .filter(row => row.kind === "scalar" || state.showIgnored || !(row.ignored || window.ExpmanConfigurations.ignoredPath(row.key, patterns)))
       .filter(row => row.kind === "scalar" || !state.diffOnly || row.different)
-      .filter(row => (row.key + (row.kind === "scalar" ? " " + window.ExpmanConfigurations.description(row.scalar) : "")).toLowerCase().includes(state.configQuery.toLowerCase()));
+      .filter(row => (row.key + (row.kind === "scalar" ? " " + window.ExpmanConfigurations.description(row.scalar) : "")).toLowerCase().includes(state.configQuery.trim().toLowerCase()));
   }
 
   function updateConfigExclusions(update, afterSave) {
@@ -1383,9 +1394,10 @@
       state.configCompareRequest += 1;
       const changes = typeof update === "function" ? update(state.workspace.state) : update;
       const result = await api("/api/ignored-configs", changes, "PUT");
+      state.configCompareRequest += 1;
       Object.assign(state.workspace.state, {ignored_configs: result.ignored_configs, ignored_files: result.ignored_files});
       if (afterSave) afterSave();
-      renderChrome();
+      renderChrome(); remember();
       if (state.tab === "configs") renderConfigTable();
     });
     state.configExclusionQueue = saved.catch(() => {});
@@ -1396,13 +1408,40 @@
     const selected = state.runs.filter(item => state.selected.has(item.id));
     try {
       await updateConfigExclusions(current => window.ExpmanConfigurations.inclusionUpdate(key, included, current, selected), () => {
-        if (state.comparison) state.comparison.rows.filter(row => row.kind !== "scalar" && row.key === key).forEach(row => { row.ignored = !included; });
+        if (!state.comparison) return;
+        let row = state.comparison.rows.find(row => row.kind !== "scalar" && row.key === key);
+        if (!row && included) {
+          const cells = state.comparison.experiments.map(item => {
+            const run = selected.find(run => run.id === item.id), config = run ? run.config : {};
+            return {present: has(config, key), value: has(config, key) ? config[key] : null};
+          });
+          row = {key, kind: "config", cells, different: new Set(cells.map(label)).size > 1};
+          state.comparison.rows.push(row);
+        }
+        if (row) row.ignored = !included;
       });
     } catch (error) { if (state.tab === "configs") renderConfigTable(); throw error; }
   }
 
+  function exactConfigPath(value) {
+    const key = value.trim();
+    return key && state.runs.some(item => state.selected.has(item.id) && has(item.config || {}, key)) ? key : "";
+  }
+
+  async function includeConfigPath(value) {
+    const key = exactConfigPath(value);
+    if (!key) throw new Error("Enter a full configuration path from the selected experiments");
+    state.configQuery = key; state.configPage = 0; state.diffOnly = false;
+    const viewport = byId("config-table-scroll");
+    if (viewport) viewport.scrollLeft = 0;
+    state.configScrollLeft = 0;
+    await setConfigIncluded(key, true);
+    if (state.tab === "configs") { renderConfigTable(); byId("config-search").focus({preventScroll: true}); }
+    remember(); notify("Configuration included: " + key);
+  }
+
   async function refreshConfigExclusions() {
-    const selected = [state.baseline].concat(ids().filter(identifier => identifier !== state.baseline)).filter(identifier => state.selected.has(identifier));
+    const selected = configurationExperimentIds();
     const serial = state.serial, request = ++state.configCompareRequest;
     const result = await api("/api/compare", {experiment_ids: selected, differences_only: false, show_ignored: state.showIgnored, scalar_rows: []});
     if (serial !== state.serial || request !== state.configCompareRequest) return;
@@ -1434,10 +1473,10 @@
     return `<th scope="col" class="${ignored ? "config-field-ignored" : ""}" data-config-key="${escape(key)}" data-config-heading="${escape(key)}"><div class="config-field-heading"><div class="config-field-actions"><button class="config-path-drag" type="button" draggable="true" data-config-drag="${escape(key)}" title="Drag to reorder columns · Alt+←/→ to move" aria-label="Reorder ${escape(field.key)}"><span aria-hidden="true">⠿</span></button>${controls}</div><code class="mono config-path-text" title="${escape(tooltip)}">${escape(name)}</code></div>${configResizeHandle(key, field.key)}</th>`;
   }
 
-  function configValueCell(field, index, highlighted) {
+  function configValueCell(field, index, highlighted, baselineIndex) {
     const cell = field.cells[index] || {present: false, value: null};
     const scalar = field.kind === "scalar", key = window.ExpmanConfigurations.rowId(field);
-    const changed = !scalar && index > 0 && label(cell) !== label(field.cells[0]);
+    const changed = !scalar && baselineIndex >= 0 && index !== baselineIndex && label(cell) !== label(field.cells[baselineIndex] || {present: false, value: null});
     const shade = highlighted ? field.scalar.highlight_color || window.ExpmanAppearance.normalize(state.workspace.settings.appearance).scalar_color : "";
     const style = highlighted ? ` style="--scalar-highlight-background:${shade};--scalar-highlight-ink:${window.ExpmanAppearance.contrastInk(shade)}"` : "";
     const title = cell.present ? typeof cell.value + ": " + configValue(cell.value) : scalar ? "No data at the requested step" : "Not set";
@@ -1456,11 +1495,24 @@
     }};
   }
 
-  function renderConfigTable() {
+  function configSearchFocus() {
+    const input = document.activeElement;
+    return input && input.id === "config-search" ? {start: input.selectionStart, end: input.selectionEnd, direction: input.selectionDirection} : null;
+  }
+
+  function restoreConfigSearchFocus(saved) {
+    const active = document.activeElement, input = byId("config-search");
+    if (!saved || !input || state.tab !== "configs" || active && active !== document.body && active.id !== "config-search") return;
+    input.focus({preventScroll: true});
+    if (saved.start != null) input.setSelectionRange(saved.start, saved.end, saved.direction);
+  }
+
+  function renderConfigTable(searchFocus = null) {
     if (!state.comparison) return;
     if (state.configResizing) { state.configTableNeedsRender = true; return; }
+    const focus = configSearchFocus() || searchFocus;
     rememberConfigScroll();
-    state.comparison = window.ExpmanConfigurations.selectedComparison(state.comparison, ids(), state.baseline);
+    state.comparison = window.ExpmanConfigurations.selectedComparison(state.comparison, configurationExperimentIds());
     const data = state.comparison, rows = configurationRows();
     const labels = window.ExpmanConfigurations.uniqueSuffixes(data.rows.filter(row => row.kind !== "scalar").map(row => row.key));
     const scalarLabels = window.ExpmanConfigurations.uniqueSuffixes(data.rows.filter(row => row.kind === "scalar").map(row => row.key), "/");
@@ -1468,10 +1520,14 @@
     const fields = rows.slice(state.configPage * 50, (state.configPage + 1) * 50);
     const columns = ["experiment-name"].concat(fields.map(field => window.ExpmanConfigurations.rowId(field)));
     const sizing = configValueMeasure();
-    state.configAutoWidths = window.ExpmanConfigurations.automaticWidths(fields, data.experiments, configCellText, sizing.measure, sizing.scale);
+    state.configAutoWidths = window.ExpmanConfigurations.automaticWidths(fields, data.experiments, configCellText, sizing.measure, sizing.scale, state.baseline);
     const highlights = new Map(fields.map(field => [window.ExpmanConfigurations.rowId(field), new Set(window.ExpmanConfigurations.highlightedCells(field))]));
+    const baselineIndex = data.experiments.findIndex(item => item.id === state.baseline);
+    const searchRestrictions = [!state.showIgnored ? "ignored" : "", state.diffOnly ? "identical" : ""].filter(Boolean);
+    const searchNotice = state.configQuery.trim() && searchRestrictions.length ? `<div id="config-search-notice" class="notice" role="status">Search excludes ${searchRestrictions.join(" and ")} configurations. <button class="button compact" data-action="search-all-config-fields">Search all fields</button></div>` : "";
+    const exactPath = exactConfigPath(state.configQuery);
     byId("view").innerHTML = `<div class="toolbar">
-      <input type="search" id="config-search" value="${escape(state.configQuery)}" placeholder="Search paths or metrics…" aria-label="Search configuration paths or scalar metrics">
+      <label>Fields <input type="search" id="config-search" value="${escape(state.configQuery)}" placeholder="Search fields; Enter includes an exact path" aria-label="Search configuration paths or scalar metrics"></label>${exactPath ? `<button class="button compact" data-action="include-config-path" data-value="${escape(exactPath)}">Include configuration</button>` : ""}
       <label>Baseline <select id="baseline" aria-label="Configuration baseline">${data.experiments.map(item => option(item.id, item.name, state.baseline)).join("")}</select></label>
       <label><input type="checkbox" id="diff-only" ${state.diffOnly ? "checked" : ""}> Config differences only</label>
       <label><input type="checkbox" id="show-ignored" ${state.showIgnored ? "checked" : ""}> Show ignored</label>
@@ -1480,11 +1536,12 @@
       <span class="config-display-controls"><span>CONFIGURATION / SCALAR</span><label class="config-full-names"><input type="checkbox" id="config-full-names" ${state.configFullNames ? "checked" : ""}> Full names</label><button id="reset-config-widths" class="icon-button" data-action="reset-config-widths" title="Reset column widths" aria-label="Reset column widths" ${Object.keys(state.configColumnWidths).length ? "" : "disabled"}>↺</button></span>
       <button class="button compact" data-action="reset-config-order" ${state.configOrder.length ? "" : "disabled"}>Reset field order</button>
       <button class="button compact push" data-action="compare-csv">Export CSV ↓</button>
-      </div><div id="config-scalar-status">${configScalarStatus()}</div><div class="notice">${data.experiments.length} experiment rows · ${rows.length} configuration/scalar fields. The first experiment is the baseline. Drag header grips to reorder columns, or focus a grip and press Alt+←/→. Values determine column widths; names wrap across lines. Uncheck a configuration to ignore it; enable Show ignored and check it to add it back.</div>
-      <div class="card"><div id="config-top-scroll" class="config-top-scroll" tabindex="0" role="region" aria-label="Horizontal scrollbar for configuration comparison"><div id="config-scroll-spacer" aria-hidden="true"></div></div><div id="config-table-scroll" class="table-wrap"><table id="config-table" class="config-table"><colgroup>${columns.map(key => `<col data-config-column="${escape(key)}">`).join("")}</colgroup><thead><tr><th scope="col" data-config-heading="experiment-name"><span class="config-experiment-name">EXPERIMENT</span>${configResizeHandle("experiment-name", "Experiment name")}</th>${fields.map(field => configHeader(field, labels, scalarLabels)).join("")}</tr></thead><tbody>${data.experiments.map((item, index) => `<tr data-experiment-id="${escape(item.id)}"><th scope="row" title="${escape(item.name)}"><div class="config-experiment-label"><span class="mono config-experiment-name">${escape(item.name)}</span>${index === 0 ? '<span class="tag">BASELINE</span>' : ""}</div></th>${fields.map(field => configValueCell(field, index, highlights.get(window.ExpmanConfigurations.rowId(field)).has(index))).join("")}</tr>`).join("")}</tbody></table></div>
-      <div class="table-footer"><span>Fields page ${state.configPage + 1} of ${Math.max(1, Math.ceil(rows.length / 50))} · 50 fields per page · all ${data.experiments.length} experiments</span><div><button class="button compact" data-action="config-prev" ${state.configPage ? "" : "disabled"}>← Previous</button> <button class="button compact" data-action="config-next" ${(state.configPage + 1) * 50 < rows.length ? "" : "disabled"}>Next →</button></div></div></div>${!rows.length ? empty("No matching comparison fields", "Try showing identical values, adding a scalar, or restoring excluded paths.") : ""}`;
+      </div>${searchNotice}<div id="config-scalar-status">${configScalarStatus()}</div><div class="notice">${data.experiments.length} experiment rows · ${rows.length} configuration/scalar fields. Configuration differences use the selected baseline. Drag header grips to reorder columns, or focus a grip and press Alt+←/→. Values determine column widths; names wrap across lines. Uncheck a configuration to ignore it; enable Show ignored and check it to add it back.</div>
+      <div class="card"><div id="config-top-scroll" class="config-top-scroll" tabindex="0" role="region" aria-label="Horizontal scrollbar for configuration comparison"><div id="config-scroll-spacer" aria-hidden="true"></div></div><div id="config-table-scroll" class="table-wrap"><table id="config-table" class="config-table"><colgroup>${columns.map(key => `<col data-config-column="${escape(key)}">`).join("")}</colgroup><thead><tr><th scope="col" data-config-heading="experiment-name"><span class="config-experiment-name">EXPERIMENT</span>${configResizeHandle("experiment-name", "Experiment name")}</th>${fields.map(field => configHeader(field, labels, scalarLabels)).join("")}</tr></thead><tbody>${data.experiments.map((item, index) => `<tr data-experiment-id="${escape(item.id)}"><th scope="row" title="${escape(item.name)}"><div class="config-experiment-label"><span class="mono config-experiment-name">${escape(item.name)}</span>${item.id === state.baseline ? '<span class="tag">BASELINE</span>' : ""}</div></th>${fields.map(field => configValueCell(field, index, highlights.get(window.ExpmanConfigurations.rowId(field)).has(index), baselineIndex)).join("")}</tr>`).join("")}</tbody></table></div>
+      <div class="table-footer"><span>Fields page ${state.configPage + 1} of ${Math.max(1, Math.ceil(rows.length / 50))} · 50 fields per page · all ${data.experiments.length} experiments</span><div><button class="button compact" data-action="config-prev" ${state.configPage ? "" : "disabled"}>← Previous</button> <button class="button compact" data-action="config-next" ${(state.configPage + 1) * 50 < rows.length ? "" : "disabled"}>Next →</button></div></div></div>${!rows.length ? empty("No matching comparison fields", state.configQuery.trim() ? searchRestrictions.length ? "Search all fields to include ignored and identical configurations, or change the field search." : "No configuration paths or scalar specifications match this search." : "Try showing identical values, adding a scalar, or restoring excluded paths.") : ""}`;
     applyConfigWidths();
     setupConfigScrolling();
+    restoreConfigSearchFocus(focus);
   }
 
   function rememberConfigScroll() {
@@ -1694,7 +1751,7 @@
 
   function relationshipRequest() {
     return {experiment_ids: ids().sort(), metric: relationshipMetric(), direction: state.direction,
-      condition_scope: state.associationScope, configuration_differences_only: state.diffOnly, configuration_query: state.configQuery,
+      condition_scope: state.associationScope, configuration_differences_only: state.diffOnly, configuration_query: state.configQuery.trim(),
       categorical_conditions: state.categoricalConditions.slice().sort(), missing_conditions: state.missingConditions.slice().sort(), separate_null_conditions: state.separateNullConditions.slice().sort(),
       ...state.analysisWindow, ...relationshipSummary(),
       ...(state.summaryTags.includes(relationshipMetric()) ? {start_step: null, end_step: null} : {})};
@@ -2458,9 +2515,9 @@
     if (state.jsonMetricLoading || state.jsonMetricJob) renderJSONMetricProgress();
   }
 
-  function discoverySignature(runs) {
-    const fields = ["id", "path", "config", "config_files", "modified", ...annotationFields];
-    return window.ExpmanViews.signature({experiments: runs.map(run => ({...Object.fromEntries(fields.map(key => [key, run[key]])), summaries: Object.fromEntries(Object.entries(run.metrics || {}).filter(([tag, metric]) => metric.summary_only))})).sort((first, second) => first.id.localeCompare(second.id))});
+  function discoverySignature(runs, includeMetrics = true) {
+    const fields = ["id", "path", "config", "config_files", ...annotationFields, ...(includeMetrics ? ["modified"] : [])];
+    return window.ExpmanViews.signature({experiments: runs.map(run => ({...Object.fromEntries(fields.map(key => [key, run[key]])), ...(includeMetrics ? {summaries: Object.fromEntries(Object.entries(run.metrics || {}).filter(([tag, metric]) => metric.summary_only))} : {})})).sort((first, second) => first.id.localeCompare(second.id))});
   }
 
   function notifyDiscoveryWarnings(warnings) {
@@ -2476,7 +2533,8 @@
     state.refreshing = true;
     try {
       const result = await api("/api/refresh", {});
-      const unchanged = (!result.revision || !state.workspace.revision || result.revision === state.workspace.revision) && discoverySignature(result.experiments) === discoverySignature(state.runs);
+      const refreshMetrics = !background || state.workspace.settings.auto_refresh === true;
+      const unchanged = (!refreshMetrics || !result.revision || !state.workspace.revision || result.revision === state.workspace.revision) && discoverySignature(result.experiments, refreshMetrics) === discoverySignature(state.runs, refreshMetrics);
       state.workspace.warnings = result.warnings;
       state.workspace.last_scan = result.last_scan;
       state.workspace.revision = result.revision;
@@ -2584,6 +2642,8 @@
     "apply-brush": async () => { manualSelection(); state.selected = new Set(state.brushed); await selectionChanged(); },
     "config-prev": () => { state.configPage -= 1; renderConfigTable(); },
     "config-next": () => { state.configPage += 1; renderConfigTable(); },
+    "search-all-config-fields": async () => { state.showIgnored = true; state.diffOnly = false; state.configPage = 0; await renderView(); },
+    "include-config-path": includeConfigPath,
     "reset-config-order": () => { state.configOrder = []; state.configPage = 0; renderConfigTable(); remember(); },
     "reset-config-widths": () => { state.configColumnWidths = {}; renderConfigTable(); remember(); },
     "retry-config-scalars": () => { state.configScalarError = ""; return ensureConfigScalars(); },
@@ -2889,6 +2949,10 @@
   });
 
   document.addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.isComposing && state.tab === "configs" && event.target.id === "config-search") {
+      const key = exactConfigPath(event.target.value);
+      if (key) { event.preventDefault(); if (!event.repeat) execute(() => includeConfigPath(key)); return; }
+    }
     if (event.key === "Escape" && state.combinedDrag) { event.preventDefault(); cancelCombinedDrag(); return; }
     if (event.key === "Escape") {
       const help = document.querySelectorAll(".panel-help-tooltip:not([hidden])");

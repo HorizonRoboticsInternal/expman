@@ -1,7 +1,9 @@
 import json
+import os
 import shutil
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -188,13 +190,62 @@ def test_summary_jobs_are_fast_and_invalidate_changed_json(json_app, monkeypatch
     ).json()
     result = complete(client, "/api/relationships/jobs", relationship["id"])
     assert [record["result"] for record in result["records"]] == [0.9]
-    path.write_text('{"accuracy":0.12345}')
+    revision = client.post("/api/refresh").json()["revision"]
+    before = path.stat()
+    path.write_text('{"accuracy":0.8}')
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert path.stat().st_size == before.st_size
+    refreshed = client.post("/api/refresh").json()
+    assert refreshed["revision"] != revision
+    assert refreshed["experiments"][0]["metrics"][tag]["last"] == 0.8
     changed = client.post("/api/compare/scalars/jobs", json=request).json()
     assert changed["id"] != first["id"]
     assert (
         complete(client, "/api/compare/scalars/jobs", changed["id"])["rows"][0]["cells"][0]["value"]
-        == 0.12345
+        == 0.8
     )
+    changed_relationship = client.post(
+        "/api/relationships/jobs", json={"experiment_ids": request["experiment_ids"], "metric": tag}
+    ).json()
+    assert changed_relationship["id"] != relationship["id"]
+    result = complete(client, "/api/relationships/jobs", changed_relationship["id"])
+    assert [record["result"] for record in result["records"]] == [0.8]
+
+
+@pytest.mark.parametrize("initial", ['{"metrics":{"score":1}}', 'x"metrics":{"score":1}}'])
+@pytest.mark.parametrize("entry", ["scores.json", "{experiment}/scores.json"])
+def test_json_cache_detects_equal_size_updates_with_preserved_mtime(
+    tmp_path, monkeypatch, initial, entry
+):
+    directory = tmp_path / "exp000"
+    directory.mkdir()
+    path = directory / "scores.json"
+    path.write_text(initial)
+    experiment = SimpleNamespace(id="first", relative_path="exp000", path=directory)
+    source = JSONMetrics(tmp_path, [entry])
+    original = source.collect([experiment])
+    assert bool(original["errors"]) == initial.startswith("x")
+    assert source.collect([experiment]) == original
+    before = path.stat()
+    time.sleep(0.01)
+    path.write_text('{"metrics":{"score":2}}')
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    )
+    assert after.st_ctime_ns != before.st_ctime_ns
+    refreshed = source.collect([experiment])
+    assert not refreshed["errors"]
+    assert refreshed["metrics"]["first"]["JSON/scores/score"]["last"] == 2
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Unchanged JSON files must reuse the cached parse")
+
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    assert source.collect([experiment]) == refreshed
 
 
 def test_json_loading_reports_progress_and_restores_sources_after_restart(

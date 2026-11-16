@@ -16,9 +16,9 @@ window.ExpmanConfigurations = {
         .map(([key, width]) => [key, this.columnWidth(key, width)]))};
   },
   columnWidth(key, width) { return Math.round(Math.max(key === "experiment-name" ? 120 : 44, Math.min(2000, width))); },
-  automaticWidths(fields, experiments, renderValue, measure = value => Array.from(value).length * 6, scale = 1) {
+  automaticWidths(fields, experiments, renderValue, measure = value => Array.from(value).length * 6, scale = 1, baseline = "") {
     const width = (values, minimum) => Math.ceil(Math.min(320 * scale, Math.max(minimum * scale, ...values.map(value => measure(value) + 18 * scale))));
-    return {"experiment-name": width(experiments.map((item, index) => item.name + (index === 0 ? " BASELINE" : "")), 120),
+    return {"experiment-name": width(experiments.map(item => item.name + (item.id === baseline ? " BASELINE" : "")), 120),
       ...Object.fromEntries(fields.map(field => [this.rowId(field), width(field.cells.map(cell => renderValue(field, cell)), 44)]))};
   },
   comparisonRecords(data, fields, renderValue) {
@@ -72,10 +72,10 @@ window.ExpmanConfigurations = {
     const target = row.scalar.highlight === "largest" ? Math.max(...values) : Math.min(...values);
     return row.cells.map((cell, index) => cell.present && cell.value === target ? index : -1).filter(index => index >= 0);
   },
-  selectedComparison(data, selected, baseline) {
-    const wanted = new Set(selected);
+  selectedComparison(data, selected) {
+    const wanted = new Map(selected.map((id, index) => [id, index]));
     const indices = data.experiments.map((item, index) => ({item, index})).filter(entry => wanted.has(entry.item.id));
-    indices.sort((first, second) => Number(second.item.id === baseline) - Number(first.item.id === baseline));
+    indices.sort((first, second) => wanted.get(first.item.id) - wanted.get(second.item.id));
     const canonical = cell => JSON.stringify(cell, (key, value) => value && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
     return {experiments: indices.map(entry => entry.item), rows: data.rows.map(row => {
       const cells = indices.map(entry => row.cells[entry.index]);
