@@ -136,52 +136,18 @@ def aggregate(members, max_points=2000, band="std", alignment="overlap"):
     }
 
 
-def curve_payload(repository, experiments, tags, state, options):
+def curve_groups(experiments, state, options):
     patterns = state["ignored_configs"]
-    configurations = {
-        item.id: active_config(item, patterns, state.get("ignored_files", []))
-        for item in experiments
-    }
-    prepared, elapsed, original, origins = {}, {}, {}, {}
-    client_smoothing = options.get("client_smoothing", False)
-    for experiment in experiments:
-        data = repository.load(experiment)
-        indexed_origin = (
-            repository.run_origin(experiment) if hasattr(repository, "run_origin") else None
-        )
-        origin = (
-            indexed_origin
-            if indexed_origin is not None
-            else min((points[0][2] for points in data.values() if len(points)), default=0)
-        )
-        origins[experiment.id] = origin
-        prepared[experiment.id] = {
-            tag: data[tag]
-            if client_smoothing
-            else series(
-                data[tag], options.get("x_axis", "step"), options.get("smoothing", 0), origin
-            )
-            for tag in tags
-            if tag in data and len(data[tag])
-        }
-        if client_smoothing:
-            continue
-        elapsed[experiment.id] = {}
-        original[experiment.id] = {}
-        for tag in prepared[experiment.id]:
-            original[experiment.id][tag] = series(
-                data[tag], options.get("x_axis", "step"), 0, origin
-            )
-            positions, timestamps = series(
-                data[tag], options.get("x_axis", "step"), 0, origin, value_column=2
-            )
-            elapsed[experiment.id][tag] = (positions, timestamps - origin)
     groups = []
     group_by = options.get("group_by")
     if group_by:
         group_by = [group_by] if isinstance(group_by, str) else group_by
         if any(ignored(key, patterns) for key in group_by):
             raise ValueError("This configuration key is ignored; restore it before grouping")
+        configurations = {
+            item.id: active_config(item, patterns, state.get("ignored_files", []))
+            for item in experiments
+        }
         buckets = defaultdict(list)
         for experiment in experiments:
             config = configurations[experiment.id]
@@ -218,6 +184,45 @@ def curve_payload(repository, experiments, tags, state, options):
             )
             for experiment in experiments
         ]
+    return groups
+
+
+def curve_payload(repository, experiments, tags, state, options):
+    groups = curve_groups(experiments, state, options)
+    prepared, elapsed, original, origins = {}, {}, {}, {}
+    client_smoothing = options.get("client_smoothing", False)
+    for experiment in experiments:
+        data = repository.load(experiment)
+        indexed_origin = (
+            repository.run_origin(experiment) if hasattr(repository, "run_origin") else None
+        )
+        origin = (
+            indexed_origin
+            if indexed_origin is not None
+            else min((points[0][2] for points in data.values() if len(points)), default=0)
+        )
+        origins[experiment.id] = origin
+        prepared[experiment.id] = {
+            tag: data[tag]
+            if client_smoothing
+            else series(
+                data[tag], options.get("x_axis", "step"), options.get("smoothing", 0), origin
+            )
+            for tag in tags
+            if tag in data and len(data[tag])
+        }
+        if client_smoothing:
+            continue
+        elapsed[experiment.id] = {}
+        original[experiment.id] = {}
+        for tag in prepared[experiment.id]:
+            original[experiment.id][tag] = series(
+                data[tag], options.get("x_axis", "step"), 0, origin
+            )
+            positions, timestamps = series(
+                data[tag], options.get("x_axis", "step"), 0, origin, value_column=2
+            )
+            elapsed[experiment.id][tag] = (positions, timestamps - origin)
     result = {}
     for tag in tags:
         traces = []
@@ -231,6 +236,7 @@ def curve_payload(repository, experiments, tags, state, options):
                         "id": identifier,
                         "name": name,
                         "member_ids": [item.id for item in available],
+                        "eligible_member_ids": [item.id for item in members],
                         "missing_members": len(members) - len(available),
                         "members": [
                             {
@@ -309,8 +315,9 @@ def analyze(
     condition_keys=None,
     smoothing=0.4,
     categorical_conditions=(),
-    missing_conditions=(),
+    missing_conditions=None,
     separate_null_conditions=(),
+    excluded_missing_conditions=(),
 ):
     records = []
     summary_only = hasattr(repository, "is_summary_metric") and repository.is_summary_metric(tag)
@@ -345,7 +352,10 @@ def analyze(
     if condition_keys is not None:
         keys = sorted(set(condition_keys))
     categorical_conditions = set(categorical_conditions)
-    missing_conditions = set(missing_conditions)
+    missing_conditions = (
+        set(keys) if missing_conditions is None else set(missing_conditions).intersection(keys)
+    )
+    missing_conditions.difference_update(excluded_missing_conditions)
     separate_null_conditions = set(separate_null_conditions)
     condition_types = {}
     associations = []
@@ -451,7 +461,7 @@ def analyze(
         "condition_keys": keys,
         "condition_types": condition_types,
         "categorical_conditions": sorted(categorical_conditions.intersection(keys)),
-        "missing_conditions": sorted(missing_conditions.intersection(keys)),
+        "missing_conditions": sorted(missing_conditions),
         "separate_null_conditions": sorted(separate_null_conditions.intersection(keys)),
         "missing_metric": len(experiments) - len(records),
         "note": "Descriptive associations, not causal effects. "

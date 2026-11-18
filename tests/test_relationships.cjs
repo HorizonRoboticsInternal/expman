@@ -11,7 +11,7 @@ const records = Array.from({length: 25}, (_, index) => ({id: "exp" + index, resu
   ...(index < 22 ? {[names[1]]: index % 2 ? "batch" : "per_env", [names[3]]: index % 3 === 0} : {}),
   ...(index === 0 ? {[names[2]]: .1} : {})
 }}));
-const data = {records, associations: names.map(key => ({key}))};
+const data = {records, missing_conditions: [], associations: names.map(key => ({key}))};
 const built = charts.build(data, names, "Train/reward");
 assert.equal(built.records.length, 25);
 assert.equal(built.incomplete, 24);
@@ -34,7 +34,7 @@ built.dimensions[2].constraintrange = [];
 assert.equal(charts.brushed(built.records, built.dimensions).length, 0);
 
 const values = [null, "null", "001", true, "true", 1, "1", "(missing)"];
-const typed = {records: values.map((value, index) => ({id: "typed" + index, result: index, config: {condition: value}})).concat({id: "absent", result: 10, config: {}})};
+const typed = {separate_null_conditions: ["condition"], records: values.map((value, index) => ({id: "typed" + index, result: index, config: {condition: value}})).concat({id: "absent", result: 10, config: {}})};
 const categories = charts.build(typed, ["condition"], "reward").dimensions[0];
 assert.equal(new Set(categories.values).size, values.length + 1);
 assert.equal(categories.ticktext[0], "(missing)");
@@ -42,11 +42,11 @@ assert(categories.ticktext.includes("(missing) [string]"));
 assert(categories.ticktext.includes("001"));
 assert.deepEqual(Array.from(charts.keys({...typed, condition_keys: []})), []);
 const optional = {records: [1, 1, 2, 2, null].map((value, index) => ({id: String(index), result: index, config: {condition: value}})).concat({id: "missing", result: 5, config: {}})};
-assert.equal(charts.condition(optional, "condition").entries.length, 5);
+assert.equal(charts.condition({...optional, excluded_missing_conditions: ["condition"]}, "condition").entries.length, 5);
 const numeric = {records: optional.records.slice(0, 4)};
 assert(charts.condition(numeric, "condition").numeric);
 assert(!charts.condition({...numeric, categorical_conditions: ["condition"]}, "condition").numeric);
-const merged = {...optional, missing_conditions: ["condition"]};
+const merged = optional;
 const grouped = charts.condition(merged, "condition");
 assert.equal(grouped.entries.length, 6);
 assert.equal(grouped.categories.length, 3);

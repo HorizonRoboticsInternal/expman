@@ -8,7 +8,7 @@
     runs: ["Experiments", "Find the runs that matter. Keep their context close.", "M4 5h16M4 12h16M4 19h16"],
     configs: ["Configurations", "See what changed between runs, down to a single configuration value.", "M8 4H4v16h4m8-16h4v16h-4M10 8h4m-4 4h4m-4 4h4"],
     analysis: ["Relationships", "Explore which experimental conditions are associated with your results.", "M4 20V4m0 16h17M7 15l4-5 4 2 5-8"],
-    time: ["Time series", "Investigate spikes, event order, recurring cycles, and phase relationships.", "M2 12h4l3-8 5 16 3-8h5"],
+    time: ["Time series", "Compare sustained changes, spikes, event order, and recurring patterns.", "M2 12h4l3-8 5 16 3-8h5"],
     native: ["TensorBoard", "The native TensorBoard interface, with all available logging plugins.", "M5 3h14v18H5zM8 8h8m-8 4h8m-8 4h5"]
   };
   const state = {
@@ -19,25 +19,25 @@
     combinedPlot: null, combinedData: null, combinedFull: null, combinedRenderGeneration: 0,
     combinedDragMode: false, combinedDrag: null, combinedFitting: false,
     panelSmoothing: {}, panelData: new Map(), smoothingRedraw: null, overviewObserver: null,
-    panelRenderGeneration: new Map(),
-    overviewLoaded: new Set(),
+    panelRenderGeneration: new Map(), curveRefreshes: new Map(),
+    overviewLoaded: new Set(), overviewEnqueue: null, overviewGroupMembers: new Map(),
     smoothingWorker: null, smoothingWorkerFailed: false, smoothingWorkerJobs: new Map(), smoothingWorkerTags: new Map(), smoothingWorkerSequence: 0,
     overviewColors: {}, overviewDefaultColors: {}, hiddenOverviewCurves: [], overviewLegendEntries: new Map(), overviewLegendSignature: "",
     experimentDefaultColors: {}, experimentColorSignature: "", overviewLegendClicks: new Map(),
     metric: "", baseline: "", sort: "name", columns: [], configQuery: "",
     configOrder: [], configScalars: [], configDragging: null, configCompareRequest: 0, configExclusionQueue: null,
-    configFullNames: false, configColumnWidths: {}, configResizing: null,
+    configFullNames: false, configColumnWidths: {}, configDisplay: {}, configDisplayEditing: null, configResizing: null,
     configScrollLeft: 0, configScrollTop: 0, configScrollObserver: null,
     diffOnly: true, showIgnored: false, configPage: 0, comparison: null, analysis: null, condition: "",
     associationScope: "configurations", relationshipMetric: "", relationshipReduction: "", relationshipSmoothing: null, parallelKeysConfigured: false,
-    categoricalConditions: [], missingConditions: [], separateNullConditions: [],
+    categoricalConditions: [], excludedMissingConditions: [], separateNullConditions: [],
     reduction: "last", direction: "max", parallelKeys: [], brushed: [], serial: 0, busy: 0,
     relationshipGeneration: 0, relationshipKey: "", relationshipJob: null, relationshipStarting: false, relationshipError: "",
     options: {x_axis: "step", smoothing: .4, band: "std", alignment: "overlap", group: "", groupKeys: [], ignoreOutliers: false},
     time: {mode: "events", experiment: "", tags: [], available: [], include: ["*"], exclude: [], reference: "", x_axis: "step", start: null,
       end: null, threshold: 5, window: 31, binary_window: 1001, period_aware: true, detector: "spike", tolerance: 10, max_lag: 100,
-      min_period: null, max_period: null, phase_period: null, detrend: true, windowed: false},
-    timeData: null, timeStarting: false, timeError: "", timeGeneration: 0, timePolling: null, autoTimer: null, selectionRequest: 0, metricsLoading: false, metricsError: "", metricsJob: null, metricsProgress: null
+      min_period: null, max_period: null, phase_period: null, detrend: true, windowed: false, ...window.ExpmanOnsets.defaults},
+    timeData: null, timeReferenceQuery: "", timeReferenceExperiment: "", timeReferenceOpen: false, timeReferenceIndex: -1, timeStarting: false, timeError: "", timeGeneration: 0, timePolling: null, autoTimer: null, selectionRequest: 0, metricsLoading: false, metricsError: "", metricsJob: null, metricsProgress: null
   };
   const byId = identifier => document.getElementById(identifier);
   const escape = value => String(value == null ? "" : value).replace(/[&<>"']/g, character => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[character]));
@@ -112,10 +112,10 @@
       combinedPlot: state.combinedPlot,
       overviewColors: state.overviewColors, hiddenOverviewCurves: state.hiddenOverviewCurves,
       configOrder: state.configOrder, configScalars: state.configScalars,
-      configFullNames: state.configFullNames, configColumnWidths: state.configColumnWidths,
+      configFullNames: state.configFullNames, configColumnWidths: state.configColumnWidths, configDisplay: state.configDisplay,
       associationScope: state.associationScope, relationshipMetric: state.relationshipMetric, diffOnly: state.diffOnly, configQuery: state.configQuery, parallelKeysConfigured: state.parallelKeysConfigured,
       relationshipReduction: state.relationshipReduction, relationshipSmoothing: state.relationshipSmoothing,
-      categoricalConditions: state.categoricalConditions, missingConditions: state.missingConditions, separateNullConditions: state.separateNullConditions,
+      categoricalConditions: state.categoricalConditions, excludedMissingConditions: state.excludedMissingConditions, separateNullConditions: state.separateNullConditions,
       tab: state.tab, options: state.options, metric: state.metric, columns: state.columns, baseline: state.baseline,
       parallelKeys: state.parallelKeys, filters: state.filters, activeFilter: state.activeFilter,
       query: state.query, collection: state.collection,
@@ -423,6 +423,32 @@
 
   const plotOptions = () => ({responsive: true, displaylogo: false, modeBarButtonsToRemove: ["lasso2d", "select2d"], toImageButtonOptions: {format: "png", scale: 2}});
 
+  function compactCurveHover(target) {
+    const legend = target.querySelector(".hoverlayer g.legend");
+    if (!legend) return;
+    const background = legend.querySelector("rect.bg"), rows = Array.from(legend.querySelectorAll("g.traces"));
+    if (!background || !rows.length) return;
+    const title = legend.querySelector(".legendtitletext"), titleBox = title && title.getBBox();
+    let top = titleBox ? titleBox.y + titleBox.height + 4 : 4;
+    legend.querySelectorAll("g.groups").forEach(group => {
+      const transform = group.transform.baseVal.consolidate();
+      group.setAttribute("transform", `translate(${transform ? transform.matrix.e : 0},0)`);
+    });
+    rows.forEach(row => {
+      const text = row.querySelector(".legendtext"), bounds = row.getBBox(), transform = row.transform.baseVal.consolidate();
+      const font = text ? Number.parseFloat(text.style.fontSize) || 10 : 10;
+      row.setAttribute("transform", `translate(${transform ? transform.matrix.e : 0},${top - bounds.y})`);
+      top += Math.max(bounds.height, font * 1.2) + 2;
+    });
+    background.setAttribute("height", Math.min(Number(background.getAttribute("height")), Math.ceil(top + 2)));
+  }
+
+  function bindCompactCurveHover(target) {
+    if (!target.expmanCompactHoverHandler) target.expmanCompactHoverHandler = () => compactCurveHover(target);
+    if (target.removeListener) target.removeListener("plotly_hover", target.expmanCompactHoverHandler);
+    target.on("plotly_hover", target.expmanCompactHoverHandler);
+  }
+
   function plot(target, traces, layout = {}) {
     if (!window.Plotly) throw new Error("The local Plotly asset could not be loaded. Refresh the page after checking the server.");
     if (!target.data) target.innerHTML = "";
@@ -431,7 +457,7 @@
       font: {family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', size: 10, color: "#8794a9"},
       xaxis: {gridcolor: "#f0f3f9", zeroline: false, tickfont: {size: 9}}, yaxis: {gridcolor: "#edf1f8", zeroline: false, tickfont: {size: 9}},
       legend: {orientation: "h", x: 0, y: -.2, font: {size: 9}}, hovermode: "closest", uirevision: state.tab}, layout);
-    return Plotly.react(target, window.ExpmanAppearance.plotTraces(traces, appearance), window.ExpmanAppearance.plotLayout(configured, appearance), plotOptions());
+    return Plotly.react(target, window.ExpmanAppearance.plotTraces(traces, appearance), window.ExpmanAppearance.plotLayout(configured, appearance), plotOptions()).then(() => bindCompactCurveHover(target));
   }
 
   const panelLogControl = tag => `<label class="panel-log-toggle" title="Logarithmic Y axis; zero and negative values are hidden"><input type="checkbox" data-panel-log-y="${escape(tag)}" aria-label="Logarithmic Y axis for ${escape(tag)}" ${state.logYPanels.includes(tag) ? "checked" : ""}> Log Y</label>`;
@@ -499,14 +525,14 @@
     if (!state.overviewObserver) return;
     for (const tag of state.panelData.keys()) {
       if (state.panelData.size <= 32) break;
-      if (tag === current || tag === state.expandedPanel || state.fullPanels && state.fullPanels[tag] && state.fullPanels[tag].result) continue;
+      if (tag === current || tag === state.expandedPanel || activeCurveRefresh(tag) || state.fullPanels && state.fullPanels[tag] && state.fullPanels[tag].result) continue;
       const index = state.visiblePanelTags.indexOf(tag), target = index >= 0 ? byId("curve-" + index) : null;
       if (!target || !target.getBoundingClientRect) continue;
       const bounds = target.getBoundingClientRect();
       if (bounds.bottom >= -600 && bounds.top <= window.innerHeight + 600) continue;
       state.panelData.delete(tag); state.overviewLoaded.delete(tag);
       if (target.data) Plotly.purge(target);
-      delete target.expmanScaleBound; delete target.expmanPanelTag;
+      delete target.expmanScaleBound; delete target.expmanPanelTag; delete target.expmanUpdateCoverage;
       target.innerHTML = '<p class="muted">Loading plot when visible…</p>';
       target.dataset.overviewPanel = tag;
       state.overviewObserver.observe(target);
@@ -610,22 +636,29 @@
     return targets.filter(target => target && target.data && target.expmanPanelTag === tag);
   }
 
-  function prepareOverviewLegend(matching) {
+  function prepareOverviewLegend(matching, configuredGroups = []) {
     prepareExperimentColors();
     const groups = (state.workspace.state || {}).groups || [];
-    const signature = JSON.stringify([ids().sort(), matching.map(run => [run.id, run.name]), state.options.group, state.options.groupKeys, groups]);
+    const signature = JSON.stringify([ids().sort(), matching.map(run => [run.id, run.name]), state.options.group, state.options.groupKeys, groups, configuredGroups]);
     if (signature === state.overviewLegendSignature) return;
     state.overviewLegendClicks.forEach(click => window.clearTimeout(click.timer));
     state.overviewLegendClicks.clear();
     state.overviewLegendSignature = signature;
     state.overviewLegendEntries = new Map();
     const selected = new Set(matching.map(run => run.id));
-    if (!state.options.group) matching.forEach(run => state.overviewLegendEntries.set(run.id, run.name));
-    else if (state.options.group === "selected" && matching.length) state.overviewLegendEntries.set("selected", "Selected experiments");
-    else if (state.options.group === "saved") groups.filter(group => group.experiment_ids.some(id => selected.has(id))).forEach(group => state.overviewLegendEntries.set("saved:" + group.id, group.name));
+    let legendGroups = configuredGroups;
+    if (!state.options.group) legendGroups = matching.map(run => ({id: run.id, name: run.name, member_ids: [run.id]}));
+    else if (state.options.group === "selected" && matching.length) legendGroups = [{id: "selected", name: "Selected experiments", member_ids: matching.map(run => run.id)}];
+    else if (state.options.group === "saved") legendGroups = groups.map(group => ({...group, member_ids: group.experiment_ids.filter(id => selected.has(id))})).filter(group => group.member_ids.length);
+    state.overviewGroupMembers = new Map();
+    legendGroups.forEach(group => {
+      const key = overviewCurveKey(group);
+      state.overviewLegendEntries.set(key, group.name);
+      state.overviewGroupMembers.set(key, {id: group.id, members: group.member_ids});
+    });
     const selectedRuns = state.runs.filter(run => state.selected.has(run.id)).slice().sort((first, second) => String(first.path || first.id).localeCompare(String(second.path || second.id)));
     const allSelected = new Set(selectedRuns.map(run => run.id));
-    const defaults = !state.options.group ? Array.from(allSelected) : state.options.group === "saved" ? groups.filter(group => group.experiment_ids.some(id => allSelected.has(id))).map(group => "saved:" + group.id) : state.options.group === "selected" ? ["selected"] : [];
+    const defaults = !state.options.group ? Array.from(allSelected) : state.options.group === "saved" ? groups.filter(group => group.experiment_ids.some(id => allSelected.has(id))).map(group => "saved:" + group.id) : Array.from(state.overviewLegendEntries.keys());
     state.overviewDefaultColors = window.ExpmanPanels.defaultColors(defaults);
   }
 
@@ -658,14 +691,16 @@
         fillcolor: target.data.map(trace => bandColor(overviewColor(trace.legendgroup)))
       });
       if (rescale) await applyPanelScale(target.expmanPanelTag, target);
+      if (rescale && target.expmanUpdateCoverage) target.expmanUpdateCoverage();
     }));
+    tags.forEach(updateCurveRefreshControl);
   }
 
   async function toggleOverviewCurve(id) {
     if (!state.overviewLegendEntries.has(id)) return;
     state.hiddenOverviewCurves = state.hiddenOverviewCurves.includes(id) ? state.hiddenOverviewCurves.filter(key => key !== id) : state.hiddenOverviewCurves.concat(id);
     remember();
-    await applyOverviewLegend();
+    await loadOverviewVisibility();
   }
 
   async function setOverviewColor(id, value) {
@@ -682,13 +717,21 @@
     const solo = keys.every(key => previousHidden.includes(key) === (key !== id));
     state.hiddenOverviewCurves = state.hiddenOverviewCurves.filter(key => !active.has(key)).concat(solo ? [] : keys.filter(key => key !== id));
     remember();
-    await applyOverviewLegend();
+    await loadOverviewVisibility();
   }
 
   async function showAllOverviewCurves() {
     state.hiddenOverviewCurves = [];
     remember();
+    await loadOverviewVisibility();
+  }
+
+  async function loadOverviewVisibility() {
+    const serial = state.serial;
     await applyOverviewLegend();
+    if (serial !== state.serial || state.tab !== "overview") return;
+    if (state.combinedPlot) execute(() => renderCombined(serial));
+    if (state.overviewEnqueue) await state.overviewEnqueue(Array.from(state.overviewLoaded));
   }
 
   async function drawExpandedPanel(source, tag) {
@@ -701,8 +744,10 @@
     layout.uirevision = "expanded:" + tag;
     layout.yaxis = Object.assign({}, layout.yaxis, {type: state.logYPanels.includes(tag) ? "log" : "linear"});
     await Plotly.react(target, JSON.parse(JSON.stringify(source.data)), layout, plotOptions());
+    bindCompactCurveHover(target);
     bindPanelScale(target, tag);
     if (!modal.open || state.expandedPanel !== tag) Plotly.purge(target);
+    updateCurveRefreshControl(tag);
   }
 
   async function expandPanel(tag) {
@@ -712,7 +757,7 @@
     const modal = byId("panel-dialog"), previous = byId("expanded-panel-plot"), legend = byId("overview-legend");
     if (previous && previous.data) Plotly.purge(previous);
     state.expandedPanel = tag;
-    modal.innerHTML = `<header class="dialog-header"><h2 id="panel-dialog-title">${escape(tag)}</h2><button class="icon-button" data-action="close-expanded-panel" aria-label="Close expanded panel">×</button></header><div class="expanded-panel-toolbar">${panelLogControl(tag)}${panelSmoothingControl(tag)}<span data-full-panel="${escape(tag)}">${fullPanelControl(tag)}</span><button class="text-button" data-action="raw-csv" data-value="${escape(tag)}">CSV ↓</button><span class="muted">Drag to zoom · Double-click the chart to reset</span></div><div id="expanded-legend-slot"></div><div class="chart" id="expanded-panel-plot"></div><footer class="dialog-footer"><button class="button" data-action="close-expanded-panel">Close</button></footer>`;
+    modal.innerHTML = `<header class="dialog-header"><h2 id="panel-dialog-title">${escape(tag)}</h2><button class="icon-button" data-action="close-expanded-panel" aria-label="Close expanded panel">×</button></header><div class="expanded-panel-toolbar">${panelLogControl(tag)}${panelSmoothingControl(tag)}<span data-full-panel="${escape(tag)}">${fullPanelControl(tag)}</span>${curveRefreshButton(tag)}<button class="text-button" data-action="raw-csv" data-value="${escape(tag)}">CSV ↓</button><span class="muted">Drag to zoom · Double-click the chart to reset</span></div><div id="expanded-legend-slot"></div><div class="chart" id="expanded-panel-plot"></div><footer class="dialog-footer"><button class="button" data-action="close-expanded-panel">Close</button></footer>`;
     if (legend) byId("expanded-legend-slot").appendChild(legend);
     if (!modal.open) modal.showModal();
     await drawExpandedPanel(source, tag);
@@ -823,8 +868,10 @@
 
   function bindCombinedInteractions(target) {
     updateCombinedInteractionControls(target);
+    updateCurveRefreshControl(null);
     if (target.expmanCombinedInteractions) return;
     target.expmanCombinedInteractions = true;
+    target.on("plotly_restyle", () => updateCurveRefreshControl(null));
     target.on("plotly_relayout", changes => {
       if (has(changes, "dragmode") && changes.dragmode !== false && state.combinedDragMode) { state.combinedDragMode = false; updateCombinedInteractionControls(target); }
     });
@@ -882,7 +929,7 @@
     const spec = state.combinedPlot;
     if (!spec) return "";
     const run = state.runs.find(item => item.id === spec.experiment);
-    return `<article class="card combined-panel"><header class="card-header"><div><h2 class="card-title">Combined metrics · ${escape(run ? run.name : "Unavailable experiment")}</h2><div class="card-subtitle">ONE EXPERIMENT · COLORS IDENTIFY METRICS</div></div><div class="card-actions"><button class="button compact" data-action="combined-metrics">Edit metrics</button><button class="icon-button" data-action="remove-combined" aria-label="Remove combined metrics plot">×</button></div></header><div class="combined-controls"><label>Scaling<select id="combined-scale" aria-label="Combined metrics scaling">${combinedScaleOptions(spec.scale)}</select></label><label>Smooth<input id="combined-smoothing" type="number" min="0" max="0.999" step="any" value="${spec.smoothing}" aria-label="Combined metrics smoothing"></label><span id="combined-full-control">${combinedFullControl()}</span><button id="combined-fit-y" class="button compact" data-action="fit-combined-y" title="Independently scale each curve to 0–1 within the current time interval, preserving X zoom" disabled>Fit Y to view</button><button id="combined-drag-toggle" class="button compact" data-action="toggle-combined-drag" aria-pressed="${state.combinedDragMode}" title="Enable to drag a curve up or down; turn off to zoom" disabled>Move curves</button><button id="combined-reset-offsets" class="button compact" data-action="reset-combined-offsets" disabled>Reset offsets</button></div><div id="combined-move-hint" class="notice" ${state.combinedDragMode ? "" : "hidden"}>Drag near a curve to move it vertically. Display offsets only; hover retains recorded values. Turn off Move curves to zoom.</div><div id="combined-chart" class="chart">${loading("Loading combined metrics…")}</div><div id="combined-status" class="chart-footer" role="status"></div></article>`;
+    return `<article class="card combined-panel"><header class="card-header"><div><h2 class="card-title">Combined metrics · ${escape(run ? run.name : "Unavailable experiment")}</h2><div class="card-subtitle">ONE EXPERIMENT · COLORS IDENTIFY METRICS</div></div><div class="card-actions">${curveRefreshButton()}<button class="button compact" data-action="combined-metrics">Edit metrics</button><button class="icon-button" data-action="remove-combined" aria-label="Remove combined metrics plot">×</button></div></header><div class="combined-controls"><label>Scaling<select id="combined-scale" aria-label="Combined metrics scaling">${combinedScaleOptions(spec.scale)}</select></label><label>Smooth<input id="combined-smoothing" type="number" min="0" max="0.999" step="any" value="${spec.smoothing}" aria-label="Combined metrics smoothing"></label><span id="combined-full-control">${combinedFullControl()}</span><button id="combined-fit-y" class="button compact" data-action="fit-combined-y" title="Independently scale each curve to 0–1 within the current time interval, preserving X zoom" disabled>Fit Y to view</button><button id="combined-drag-toggle" class="button compact" data-action="toggle-combined-drag" aria-pressed="${state.combinedDragMode}" title="Enable to drag a curve up or down; turn off to zoom" disabled>Move curves</button><button id="combined-reset-offsets" class="button compact" data-action="reset-combined-offsets" disabled>Reset offsets</button></div><div id="combined-move-hint" class="notice" ${state.combinedDragMode ? "" : "hidden"}>Drag near a curve to move it vertically. Display offsets only; hover retains recorded values. Turn off Move curves to zoom.</div><div id="combined-chart" class="chart">${loading("Loading combined metrics…")}</div><div id="combined-status" class="chart-footer" role="status"></div></article>`;
   }
 
   function combinedKey() {
@@ -902,6 +949,7 @@
   function updateCombinedFullControl() {
     const target = byId("combined-full-control");
     if (target) target.innerHTML = combinedFullControl();
+    updateCurveRefreshControl(null);
   }
 
   function invalidateCombinedFull() {
@@ -942,9 +990,10 @@
   }
 
   async function loadCombinedFull() {
+    if (activeCurveRefresh(null)) return;
     invalidateCombinedFull();
     const spec = state.combinedPlot;
-    if (!spec || !overviewRuns().some(run => run.id === spec.experiment)) return;
+    if (!spec || !overviewRuns().some(run => run.id === spec.experiment) || !combinedExperimentVisible(spec.experiment)) return;
     const previous = state.combinedFull;
     if (previous && !previous.error) return;
     if (previous && previous.result) {
@@ -974,7 +1023,14 @@
     const spec = state.combinedPlot, key = combinedKey(), target = byId("combined-chart");
     if (!spec || !target || state.tab !== "overview") return;
     if (!overviewRuns().some(item => item.id === spec.experiment)) {
+      target.hidden = false;
       target.innerHTML = empty("Experiment outside the current selection", "Select its experiment or use Edit metrics to choose another.");
+      return;
+    }
+    target.hidden = !combinedExperimentVisible(spec.experiment);
+    updateCombinedFullControl();
+    if (target.hidden) {
+      byId("combined-status").textContent = "Show this experiment in the shared legend to load its curves.";
       return;
     }
     try {
@@ -1005,6 +1061,8 @@
       }
       const fitted = current.scaleWindow && current.scaleWindow.axis === state.options.x_axis ? current.scaleWindow : null;
       const initialCrop = crop || (!target.data && fitted ? [fitted.start, fitted.end].map(value => fitted.axis === "wall" ? new Date(value) : value) : null);
+      const visibility = new Map((target.data || []).map(trace => [trace.meta.metric, trace.visible]));
+      traces.forEach(trace => { if (visibility.has(trace.meta.metric)) trace.visible = visibility.get(trace.meta.metric); });
       cancelCombinedDrag();
       await plot(target, traces, {hovermode: "x unified", showlegend: true, dragmode: state.combinedDragMode ? false : "zoom", uirevision: key + ":" + current.scale + ":" + state.options.x_axis, margin: {l: 65, r: 25, t: 15, b: 80}, xaxis: {title: {text: state.options.x_axis === "step" ? "Training step" : state.options.x_axis === "wall" ? "Wall time" : "Elapsed seconds"}, ...(initialCrop ? {range: initialCrop, autorange: false} : {})}, yaxis: {title: {text: axisLabel}, ...(current.scale === "minmax" ? {range: [-.05, 1.05]} : {})}});
       if (serial !== state.serial || generation !== state.combinedRenderGeneration || key !== combinedKey() || state.tab !== "overview") return;
@@ -1023,10 +1081,11 @@
   }
 
   function curveCard(tag, index) {
-    return `<article class="card overview-panel"><header class="card-header"><div style="min-width:0"><h2 class="card-title" title="${escape(tag)}">${escape(tag)}</h2><div class="card-subtitle">SCALAR · ${state.options.group ? "GROUP MEAN" : "INDIVIDUAL RUNS"}</div></div><div class="card-actions">${panelLogControl(tag)}${panelSmoothingControl(tag)}<span data-full-panel="${escape(tag)}">${fullPanelControl(tag)}</span><button class="text-button" data-action="raw-csv" data-value="${escape(tag)}">CSV ↓</button><button class="button compact panel-expand-button" data-action="expand-panel" data-value="${escape(tag)}" aria-label="Expand panel ${escape(tag)}" title="Expand panel">↗</button><button class="icon-button" data-action="remove-panel" data-value="${escape(tag)}" aria-label="Remove ${escape(tag)}">×</button></div></header><div class="chart" id="curve-${index}" data-overview-panel="${escape(tag)}"></div><div class="chart-footer"><span id="curve-note-${index}">Reading scalar observations…</span><span>Drag to zoom · Double-click chart to reset</span></div><div id="curve-coverage-${index}" class="panel-coverage"></div></article>`;
+    return `<article class="card overview-panel"><header class="card-header"><div style="min-width:0"><h2 class="card-title" title="${escape(tag)}">${escape(tag)}</h2><div class="card-subtitle">SCALAR · ${state.options.group ? "GROUP MEAN" : "INDIVIDUAL RUNS"}</div></div><div class="card-actions">${panelLogControl(tag)}${panelSmoothingControl(tag)}<span data-full-panel="${escape(tag)}">${fullPanelControl(tag)}</span>${curveRefreshButton(tag)}<button class="text-button" data-action="raw-csv" data-value="${escape(tag)}">CSV ↓</button><button class="button compact panel-expand-button" data-action="expand-panel" data-value="${escape(tag)}" aria-label="Expand panel ${escape(tag)}" title="Expand panel">↗</button><button class="icon-button" data-action="remove-panel" data-value="${escape(tag)}" aria-label="Remove ${escape(tag)}">×</button></div></header><div class="chart" id="curve-${index}" data-overview-panel="${escape(tag)}"></div><div class="chart-footer"><span id="curve-note-${index}">Reading scalar observations…</span><span>Drag to zoom · Double-click chart to reset</span></div><div id="curve-coverage-${index}" class="panel-coverage"></div></article>`;
   }
 
   async function renderOverview(serial) {
+    state.overviewEnqueue = null;
     invalidateCombinedFull();
     if (state.overviewObserver) state.overviewObserver.disconnect();
     state.overviewObserver = null;
@@ -1040,14 +1099,21 @@
         (visibleRuns().length ? '<button class="button primary" data-action="select-visible">Select matching experiments</button>' : "") + '</div>';
       return;
     }
-    prepareOverviewLegend(matching);
-    const tree = state.showAllPanels ? window.ExpmanPanels.tree(state.panels, state.panelQuery, state.collapsedPanelGroups) : null;
-    const page = tree ? {tags: tree.tags, page: 0, pages: 1, size: state.panelPageSize, total: tree.tags.length, from: tree.tags.length ? 1 : 0, to: tree.tags.length} : window.ExpmanPanels.page(state.panels, state.panelQuery, state.panelPage, state.panelPageSize);
-    state.panelPage = page.page;
-    state.panelPageSize = page.size;
+    const signal = state.viewController && state.viewController.signal;
+    const configuredGroups = state.options.group === "config" && matching.length && state.options.groupKeys.length
+      ? await api("/api/curves/groups", curveRequest([]), "POST", signal) : [];
+    if (serial !== state.serial || state.tab !== "overview") return;
+    prepareOverviewLegend(matching, configuredGroups);
+    const filtering = Boolean(state.panelQuery.trim());
+    const tree = state.showAllPanels && !filtering ? window.ExpmanPanels.tree(state.panels, "", state.collapsedPanelGroups) : null;
+    const allTags = filtering ? window.ExpmanPanels.matching(state.panels, state.panelQuery) : tree && tree.tags;
+    const page = allTags
+      ? {tags: allTags, page: 0, pages: 1, size: state.panelPageSize, total: allTags.length, from: allTags.length ? 1 : 0, to: allTags.length}
+      : window.ExpmanPanels.page(state.panels, "", state.panelPage, state.panelPageSize);
+    if (!filtering) { state.panelPage = page.page; state.panelPageSize = page.size; }
     state.visiblePanelTags = page.tags;
     if (state.expandedPanel && !page.tags.includes(state.expandedPanel) && byId("panel-dialog").open) byId("panel-dialog").close();
-    for (const tag of state.panelData.keys()) if (!page.tags.includes(tag)) state.panelData.delete(tag);
+    state.panelData.clear();
     const indices = new Map(page.tags.map((tag, index) => [tag, index]));
     function section(node) {
       const cards = node.tags.filter(tag => indices.has(tag)).map(tag => curveCard(tag, indices.get(tag))).join("");
@@ -1055,6 +1121,8 @@
       if (node === tree.root) return contents;
       return `<section class="panel-group" data-panel-prefix="${escape(node.prefix)}"><button class="panel-group-heading" data-action="toggle-panel-group" data-value="${escape(node.prefix)}" aria-expanded="${!node.collapsed}"><span aria-hidden="true">${node.collapsed ? "▸" : "▾"}</span><strong>${escape(node.prefix)}/</strong><span class="muted">${node.count} ${node.count === 1 ? "panel" : "panels"}</span></button>${node.collapsed ? "" : `<div class="panel-group-content">${contents}</div>`}</section>`;
     }
+    const focusedFilter = document.activeElement && document.activeElement.id === "panel-filter" ? document.activeElement : null;
+    const caret = focusedFilter && [focusedFilter.selectionStart, focusedFilter.selectionEnd];
     byId("view").innerHTML = `
       ${state.metricsLoading ? `<div id="overview-discovery-progress">${metricLoading(true)}</div>` : ""}
       ${matching.length < state.selected.size ? `<div class="notice">Showing ${matching.length} of ${state.selected.size} selected experiments matching the search and filters. <button class="text-button" data-action="clear-all-filters">Clear search and filters</button></div>` : ""}
@@ -1074,9 +1142,9 @@
       ${combinedCard()}
       <div class="toolbar">
         <div class="search-box"><input type="search" id="panel-filter" value="${escape(state.panelQuery)}" placeholder="Filter panels by metric tag…" aria-label="Filter panels by metric tag"></div>
-        <span class="muted">Showing ${page.from}–${page.to} of ${page.total}${tree ? ` expanded · ${tree.total} matching` : state.panelQuery ? " matching" : ""} panels</span>
+        <span class="muted" role="status">${filtering ? `${page.total} matching ${page.total === 1 ? "panel" : "panels"}` : `Showing ${page.from}–${page.to} of ${page.total}${tree ? ` expanded · ${tree.total} matching` : ""} panels`}</span>
         ${tree ? '<button class="button compact" data-action="expand-panel-groups">Expand all</button><button class="button compact" data-action="collapse-panel-groups">Collapse all</button>' : ""}
-        ${!tree ? `<label class="push">Per page <select id="panels-per-page">${[8, 16, 32].map(size => option(String(size), String(size), String(page.size))).join("")}</select></label>
+        ${!tree && !filtering ? `<label class="push">Per page <select id="panels-per-page">${[8, 16, 32].map(size => option(String(size), String(size), String(page.size))).join("")}</select></label>
         <button class="button compact" data-action="panels-prev" ${page.page ? "" : "disabled"}>← Previous</button>
         <span class="muted">${page.page + 1} / ${page.pages}</span>
         <button class="button compact" data-action="panels-next" ${page.page + 1 < page.pages ? "" : "disabled"}>Next →</button>` : ""}
@@ -1085,6 +1153,11 @@
       <div id="overview-panels" class="overview-panels" data-panel-size="${state.panelSize}">${tree ? section(tree.root) : `<div class="chart-grid">${page.tags.map(curveCard).join("")}</div>`}</div>
       ${!page.tags.length ? empty(tree && tree.total ? "Panel groups are collapsed" : state.panels.length ? "No panels match this filter" : "No scalar metrics selected", tree && tree.total ? "Expand a tag prefix or choose Expand all to display its panels." : state.panels.length ? "Change the metric-tag filter to browse other panels." : "Choose panels or select experiments that contain scalar logs.") : ""}
       <div class="notice">Means use interpolation inside recorded ranges. Bands show descriptive spread; standard error requires two contributors. Smoothing affects charts, not analysis outcomes.</div>`;
+    if (focusedFilter) {
+      const input = byId("panel-filter");
+      input.focus({preventScroll: true});
+      input.setSelectionRange(...caret);
+    }
     renderOverviewLegend();
     remember();
     if (state.combinedPlot) execute(() => renderCombined(serial));
@@ -1093,26 +1166,48 @@
     state.overviewLoaded = loaded;
     let loading = null;
     const enqueue = tags => {
-      tags.forEach(tag => { if (!loaded.has(tag)) pending.add(tag); });
+      tags.forEach(tag => { if (indices.has(tag)) pending.add(tag); });
       if (loading) return loading;
       loading = (async () => {
-        while (pending.size && serial === state.serial && state.tab === "overview") {
-          const batch = Array.from(pending).slice(0, 32);
-          batch.forEach(tag => { pending.delete(tag); loaded.add(tag); });
-          const result = await api("/api/curves", curveRequest(batch), undefined, state.viewController && state.viewController.signal);
-          if (serial !== state.serial || state.tab !== "overview") return;
-          for (const tag of batch) {
+        while (pending.size && serial === state.serial && state.overviewEnqueue === enqueue) {
+          const [first] = pending, full = state.fullPanels && state.fullPanels[first];
+          if (full && (full.result || full.previous)) {
+            pending.delete(first); loaded.add(first);
+            const result = full.result || full.previous.result;
+            if (!state.panelData.has(first)) await drawCurvePanel(first, indices.get(first), result, serial);
+            if (!full.error) await loadFullPanel(first);
+            continue;
+          }
+          const visible = visibleOverviewKeys();
+          const missing = tag => {
+            const cached = state.panelData.get(tag);
+            return cached ? visible.filter(key => !cached.loadedKeys.has(key)) : visible;
+          };
+          const keys = missing(first), signature = JSON.stringify(keys);
+          const batch = Array.from(pending).filter(tag => {
             const full = state.fullPanels && state.fullPanels[tag];
-            await drawCurvePanel(tag, indices.get(tag), full && full.result || result, serial);
+            return !(full && (full.result || full.previous)) && JSON.stringify(missing(tag)) === signature;
+          }).slice(0, 32);
+          batch.forEach(tag => { pending.delete(tag); loaded.add(tag); });
+          const request = curveRequest(batch, keys);
+          const result = request.experiment_ids.length ? await api("/api/curves", request, "POST", signal) : {source: "tensorboard", client_smoothing: true, curves: {}};
+          if (serial !== state.serial || state.overviewEnqueue !== enqueue) return;
+          for (const tag of batch) {
+            const cached = state.panelData.get(tag);
+            if (!keys.length && cached) continue;
+            const merged = mergePanelCurves(tag, cached && cached.result, result);
+            await drawCurvePanel(tag, indices.get(tag), merged, serial, new Set([...(cached ? cached.loadedKeys : []), ...keys]));
           }
         }
       })().finally(() => { loading = null; });
       return loading;
     };
-    const eager = tree && window.IntersectionObserver ? page.tags.slice(0, state.panelPageSize) : page.tags;
+    state.overviewEnqueue = enqueue;
+    const lazy = (tree || filtering) && window.IntersectionObserver;
+    const eager = lazy ? page.tags.slice(0, state.panelPageSize) : page.tags;
     await enqueue(eager);
     if (serial !== state.serial || state.tab !== "overview") return;
-    if (tree && window.IntersectionObserver) {
+    if (lazy) {
       const observer = new window.IntersectionObserver(entries => {
         const tags = entries.filter(entry => entry.isIntersecting).map(entry => { observer.unobserve(entry.target); return entry.target.dataset.overviewPanel; });
         if (tags.length) execute(() => enqueue(tags));
@@ -1125,14 +1220,18 @@
     }
   }
 
-  async function drawCurvePanel(tag, index, result, serial) {
+  async function drawCurvePanel(tag, index, result, serial, loadedKeys) {
     if (serial !== state.serial || state.tab !== "overview") return;
       const full = state.fullPanels && state.fullPanels[tag];
-      if (full && full.result && full.key === fullPanelKey(tag)) result = full.result;
+      if (full && full.key === fullPanelKey(tag)) {
+        const complete = full.result ? full : full.previous;
+        if (complete) { result = complete.result; loadedKeys = complete.loadedKeys; }
+      }
+      const cached = state.panelData.get(tag);
       const generation = (state.panelRenderGeneration.get(tag) || 0) + 1;
       state.panelRenderGeneration.set(tag, generation);
       state.panelData.delete(tag);
-      state.panelData.set(tag, {key: fullPanelKey(tag), result: {source: result.source, client_smoothing: result.client_smoothing, curves: {[tag]: result.curves[tag] || []}}});
+      state.panelData.set(tag, {key: fullPanelKey(tag), loadedKeys: loadedKeys || (cached && cached.loadedKeys) || new Set(), result: {source: result.source, client_smoothing: result.client_smoothing, curves: {[tag]: result.curves[tag] || []}}});
       const smoothing = panelSmoothing(tag);
       const traces = [], curves = await prepareBrowserCurves(tag, result.curves[tag] || [], {...state.options, smoothing, max_points: result.source === "all-values" ? Number.MAX_SAFE_INTEGER : 2000});
       if (serial !== state.serial || state.tab !== "overview") return;
@@ -1161,32 +1260,170 @@
       if (legendChanged) renderOverviewLegend();
       await plot(target, traces, {hovermode: "x unified", showlegend: false, yaxis: {...panelYScale(tag, traces), gridcolor: "#edf1f8", zeroline: false}, xaxis: {title: {text: state.options.x_axis === "step" ? "Training step" : state.options.x_axis === "wall" ? "Wall time" : "Elapsed seconds", font: {size: 9}}, gridcolor: "#f1f3f8", zeroline: false}});
       bindPanelScale(target, tag);
+      updateCurveRefreshControl(tag);
       if (state.expandedPanel === tag) await drawExpandedPanel(target, tag);
       if (serial !== state.serial || state.tab !== "overview") return;
       if (generation !== state.panelRenderGeneration.get(tag)) return;
       if (full && full.result === result && state.fullPanels[tag] === full) {
         full.rendered = true; full.error = null; updateFullPanelControl(tag);
       }
-      const missing = curves.reduce((total, item) => total + item.missing_members, 0);
-      const coverage = panelCoverage(tag, curves);
-      byId("curve-note-" + index).textContent = `${state.options.group ? curves.length + " groups · " : ""}${coverage.text}${result.source === "tensorboard" ? " · TensorBoard retained samples" + (state.options.group ? " · means/bands use samples" : "") : result.source === "all-values" ? " · all values loaded" : curves.some(item => item.sampled) ? " · display sampled" : ""}${missing ? ` · ${missing} members missing this metric` : ""}${curves.length && curves.every(item => !item.x.length) ? " · no common overlap" : ""}`;
-      const missingOriginal = smoothing > 0 && curves.some(curve => curve.x.length && (!Array.isArray(curve.original_y) || curve.original_y.length !== curve.x.length));
-      const legacy = curves.length && !result.client_smoothing;
-      byId("curve-coverage-" + index).innerHTML = coverage.html + (legacy ? '<p class="notice warning" role="status">Restart Expman and refresh this page to enable browser smoothing with original observations.</p>' : missingOriginal ? '<p class="notice warning" role="status">Original values are missing from the server response. Restart Expman and refresh this page to load them.</p>' : "");
+      target.expmanUpdateCoverage = () => updatePanelCoverage(tag, index, curves, result, smoothing);
+      target.expmanUpdateCoverage();
       trimPanelData(tag);
   }
 
-  function curveRequest(tags) {
+  function visibleOverviewKeys() {
+    const hidden = new Set(state.hiddenOverviewCurves);
+    return Array.from(state.overviewGroupMembers.keys()).filter(key => !hidden.has(key));
+  }
+
+  function combinedExperimentVisible(identifier) {
+    if (!state.options.group) return !state.hiddenOverviewCurves.includes(identifier);
+    return visibleOverviewKeys().some(key => state.overviewGroupMembers.get(key).members.includes(identifier));
+  }
+
+  function mergePanelCurves(tag, cached, fresh) {
+    const curves = new Map(((cached && cached.curves[tag]) || []).map(curve => [overviewCurveKey(curve), curve]));
+    (fresh.curves[tag] || []).forEach(curve => curves.set(overviewCurveKey(curve), curve));
+    return {...fresh, curves: {[tag]: Array.from(curves.values())}};
+  }
+
+  function curveRequest(tags, keys = null) {
     const matching = new Set(overviewRuns().map(item => item.id));
     const request = {experiment_ids: ids().filter(identifier => matching.has(identifier)), tags, source: "tensorboard", client_smoothing: true, x_axis: state.options.x_axis, smoothing: 0, band: state.options.band, alignment: state.options.alignment};
     if (state.options.group === "config") request.group_by = state.options.groupKeys;
     if (state.options.group === "selected") { request.group_by = []; request.combine_selected = true; }
     if (state.options.group === "saved") request.group_ids = state.workspace.state.groups.map(group => group.id);
+    if (keys) {
+      const groups = keys.map(key => state.overviewGroupMembers.get(key)).filter(Boolean);
+      const members = new Set(groups.flatMap(group => group.members));
+      request.experiment_ids = request.experiment_ids.filter(id => members.has(id));
+      if (request.group_ids) request.group_ids = groups.map(group => group.id);
+    }
     return request;
   }
 
+  function curveRefreshButton(tag = null) {
+    const action = tag == null ? "refresh-combined-curves" : "refresh-panel-curves";
+    const label = tag == null ? "Refresh visible combined curves" : "Refresh visible curves for " + tag;
+    return `<button type="button" class="button compact plot-refresh-button" data-action="${action}"${tag == null ? "" : ` data-value="${escape(tag)}"`} title="Refresh visible curves" aria-label="${escape(label)}" disabled>↻</button>`;
+  }
+
+  function activeCurveRefresh(tag) {
+    const item = state.curveRefreshes.get(tag);
+    return item && item.current() ? item : null;
+  }
+
+  function refreshableTraces(tag) {
+    const target = tag == null ? byId("combined-chart") : panelTargets(tag)[0];
+    if (tag == null && (!target || target.hidden)) return [];
+    return ((target && target.data) || []).filter(trace => trace.visible !== false && trace.visible !== "legendonly" && trace.hoverinfo !== "skip" && trace.x.length);
+  }
+
+  function updateCurveRefreshControl(tag) {
+    const action = tag == null ? "refresh-combined-curves" : "refresh-panel-curves";
+    const item = activeCurveRefresh(tag);
+    const full = tag == null ? state.combinedFull : state.fullPanels && state.fullPanels[tag];
+    const loadingFull = full && !full.result && !full.error;
+    const hiddenCombined = tag == null && state.combinedPlot && !combinedExperimentVisible(state.combinedPlot.experiment);
+    const disabled = Boolean(item || loadingFull || !refreshableTraces(tag).length);
+    document.querySelectorAll(`[data-action="${action}"]`).forEach(button => {
+      if (tag != null && button.dataset.value !== tag) return;
+      button.disabled = disabled;
+      button.textContent = item ? "…" : "↻";
+      button.title = item ? "Refreshing visible curves" + (item.percent == null ? "…" : ` · ${item.percent}%`) : "Refresh visible curves";
+      button.setAttribute("aria-busy", String(Boolean(item)));
+    });
+    const fullControls = tag == null ? '[data-action="load-combined-full"]' : '[data-action="load-full-panel"]';
+    document.querySelectorAll(fullControls).forEach(button => {
+      if (tag == null || button.dataset.value === tag) button.disabled = Boolean(item || hiddenCombined || tag != null && !visibleOverviewKeys().length);
+    });
+  }
+
+  async function refreshCurveData(request, full, item, signal, updateProgress) {
+    if (!full) return api("/api/curves", request, "POST", signal);
+    const job = await api("/api/curves/all/jobs", request, "POST", signal);
+    const path = "/api/curves/all/jobs/" + job.id;
+    while (item.current()) {
+      const status = await api(path, undefined, undefined, signal);
+      if (status.status === "complete") return api(path + "/result", undefined, undefined, signal);
+      if (status.status === "error" || status.status === "cancelled") throw new Error(status.error || "Refresh cancelled");
+      item.percent = Math.floor(status.percent || 0);
+      updateProgress();
+      await new Promise(resolve => window.setTimeout(resolve, 750));
+    }
+  }
+
+  async function refreshVisibleCurves(tag) {
+    if (state.tab !== "overview" || activeCurveRefresh(tag)) return;
+    const traces = refreshableTraces(tag), combined = tag == null;
+    if (!traces.length) return;
+    const full = combined ? state.combinedFull : state.fullPanels && state.fullPanels[tag];
+    if (full && !full.result && !full.error) return;
+    const cached = combined ? state.combinedData : state.panelData.get(tag);
+    const getKey = () => combined ? combinedKey() : fullPanelKey(tag);
+    const key = getKey(), serial = state.serial;
+    if (!cached || cached.key !== key) return;
+    const latest = cached.result;
+    let request;
+    if (combined) {
+      const spec = state.combinedPlot;
+      if (!spec || !overviewRuns().some(run => run.id === spec.experiment)) return;
+      request = {experiment_ids: [spec.experiment], tags: traces.map(trace => trace.meta.metric), source: "tensorboard", client_smoothing: true};
+    } else {
+      const visible = new Set(traces.map(trace => trace.legendgroup));
+      request = curveRequest([tag], visibleOverviewKeys().filter(key => visible.has(key)));
+      if (!request.experiment_ids.length) return;
+    }
+    const item = {current: () => state.tab === "overview" && serial === state.serial && key === getKey()};
+    state.curveRefreshes.set(tag, item);
+    updateCurveRefreshControl(tag);
+    try {
+      const signal = state.viewController && state.viewController.signal;
+      const fresh = await refreshCurveData(request, latest.source === "all-values", item, signal, () => updateCurveRefreshControl(tag));
+      if (!fresh || !item.current()) return;
+      if (!request.tags.some(metric => (fresh.curves[metric] || []).length)) throw new Error("No observations returned for the visible curves");
+      const result = {...latest, curves: {...latest.curves}};
+      if (combined) {
+        for (const metric of request.tags) if (fresh.curves[metric] && fresh.curves[metric].length) result.curves[metric] = fresh.curves[metric];
+        state.combinedData = {key, result, provisional: state.metricsLoading, discoverySignature: state.metricsPreviewSignature};
+        if (full && full.result) full.result = result;
+        await renderCombined(serial);
+      } else {
+        const current = state.panelData.get(tag);
+        const merged = mergePanelCurves(tag, current ? current.result : latest, fresh);
+        if (full && full.result) full.result = merged;
+        const index = state.visiblePanelTags.indexOf(tag);
+        if (index >= 0) await drawCurvePanel(tag, index, merged, serial);
+      }
+    } catch (error) {
+      if (item.current() && error.name !== "AbortError") notify("Could not refresh curves: " + errorText(error), true);
+    } finally {
+      if (state.curveRefreshes.get(tag) === item) state.curveRefreshes.delete(tag);
+      updateCurveRefreshControl(tag);
+      if (tag != null && item.current() && state.overviewEnqueue) execute(() => state.overviewEnqueue([tag]));
+    }
+  }
+
+  function updatePanelCoverage(tag, index, cachedCurves, {source, client_smoothing}, smoothing) {
+    const visible = new Set(visibleOverviewKeys());
+    const curves = cachedCurves.filter(curve => visible.has(overviewCurveKey(curve)));
+    if (!visible.size) {
+      byId("curve-note-" + index).textContent = "No curves visible";
+      byId("curve-coverage-" + index).innerHTML = "";
+      return;
+    }
+    const missing = curves.reduce((total, item) => total + item.missing_members, 0);
+    const coverage = panelCoverage(tag, curves);
+    byId("curve-note-" + index).textContent = `${state.options.group ? curves.length + " groups · " : ""}${coverage.text}${source === "tensorboard" ? " · TensorBoard retained samples" + (state.options.group ? " · means/bands use samples" : "") : source === "all-values" ? " · all values loaded" : curves.some(item => item.sampled) ? " · display sampled" : ""}${missing ? ` · ${missing} members missing this metric` : ""}${curves.length && curves.every(item => !item.x.length) ? " · no common overlap" : ""}`;
+    const missingOriginal = smoothing > 0 && curves.some(curve => curve.x.length && (!Array.isArray(curve.original_y) || curve.original_y.length !== curve.x.length));
+    const legacy = curves.length && !client_smoothing;
+    byId("curve-coverage-" + index).innerHTML = coverage.html + (legacy ? '<p class="notice warning" role="status">Restart Expman and refresh this page to enable browser smoothing with original observations.</p>' : missingOriginal ? '<p class="notice warning" role="status">Original values are missing from the server response. Restart Expman and refresh this page to load them.</p>' : "");
+  }
+
   function panelCoverage(tag, curves) {
-    const selected = overviewRuns();
+    const members = new Set(visibleOverviewKeys().flatMap(key => state.overviewGroupMembers.get(key).members));
+    const selected = overviewRuns().filter(run => members.has(run.id));
     const available = new Set(curves.filter(curve => curve.x.length).flatMap(curve => curve.member_ids));
     const missing = selected.filter(item => !available.has(item.id)).map(item => {
       let reason = "No values available for this metric";
@@ -1198,7 +1435,7 @@
       return {name: item.name, reason};
     });
     return {
-      text: `${selected.filter(item => available.has(item.id)).length} of ${selected.length} selected experiments plotted`,
+      text: `${selected.filter(item => available.has(item.id)).length} of ${selected.length} ${state.hiddenOverviewCurves.length ? "visible" : "selected"} experiments plotted`,
       html: missing.length ? `<details><summary>${missing.length} selected ${missing.length === 1 ? "experiment without" : "experiments without"} plotted data</summary><ul>${missing.map(item => `<li><strong>${escape(item.name)}</strong><span>${escape(item.reason)}</span></li>`).join("")}</ul></details>` : ""
     };
   }
@@ -1219,6 +1456,7 @@
 
   function updateFullPanelControl(tag) {
     document.querySelectorAll("[data-full-panel]").forEach(target => { if (target.dataset.fullPanel === tag) target.innerHTML = fullPanelControl(tag); });
+    updateCurveRefreshControl(tag);
   }
 
   function invalidateFullPanels() {
@@ -1235,7 +1473,9 @@
   async function cancelFullPanel(tag) {
     const item = state.fullPanels && state.fullPanels[tag];
     if (!item) return;
-    delete state.fullPanels[tag]; window.clearTimeout(item.timer);
+    if (item.previous) state.fullPanels[tag] = item.previous;
+    else delete state.fullPanels[tag];
+    window.clearTimeout(item.timer);
     updateFullPanelControl(tag);
     if (item.id && !item.result && !item.error) await api("/api/curves/all/jobs/" + item.id + "/cancel", {});
   }
@@ -1250,19 +1490,29 @@
       if (status.status === "complete") {
         const result = await api("/api/curves/all/jobs/" + item.id + "/result");
         if (state.fullPanels[tag] !== item || item.key !== fullPanelKey(tag)) return;
-        item.result = result;
+        item.result = mergePanelCurves(tag, item.previous && item.previous.result, result);
+        delete item.previous;
         const index = state.visiblePanelTags.indexOf(tag);
-        if (index >= 0 && state.tab === "overview") await drawCurvePanel(tag, index, result, state.serial);
+        if (index >= 0 && state.tab === "overview") {
+          await drawCurvePanel(tag, index, item.result, state.serial);
+          if (state.overviewEnqueue && visibleOverviewKeys().some(key => !item.loadedKeys.has(key))) execute(() => state.overviewEnqueue([tag]));
+        }
       } else item.timer = window.setTimeout(() => execute(() => pollFullPanel(tag, item)), 1000);
     } catch (error) { if (state.fullPanels[tag] === item) { item.error = errorText(error); notify(item.error, true); } }
     updateFullPanelControl(tag);
   }
 
   async function loadFullPanel(tag) {
+    if (activeCurveRefresh(tag)) return;
     state.fullPanels = state.fullPanels || {};
     const previous = state.fullPanels[tag];
-    if (previous && !previous.error && previous.key === fullPanelKey(tag)) return;
-    if (previous && previous.result && previous.key === fullPanelKey(tag)) {
+    const key = fullPanelKey(tag), visible = visibleOverviewKeys();
+    const same = previous && previous.key === key;
+    if (same && !previous.result && !previous.error) return;
+    const complete = same && (previous.result ? previous : previous.previous);
+    const loaded = complete && complete.loadedKeys || new Set();
+    const missing = visible.filter(id => !loaded.has(id));
+    if (!missing.length && same && previous.result && previous.error) {
       previous.error = null; previous.rendered = false; updateFullPanelControl(tag);
       try {
         const index = state.visiblePanelTags.indexOf(tag);
@@ -1270,10 +1520,13 @@
       } catch (error) { previous.error = errorText(error); notify(previous.error, true); }
       updateFullPanelControl(tag); return;
     }
-    const item = {key: fullPanelKey(tag), percent: 0};
+    if (!missing.length) return;
+    const request = curveRequest([tag], missing);
+    if (!request.experiment_ids.length) return;
+    const item = {key, percent: 0, previous: complete, loadedKeys: new Set([...loaded, ...missing])};
     state.fullPanels[tag] = item; updateFullPanelControl(tag);
     try {
-      const job = await api("/api/curves/all/jobs", curveRequest([tag]));
+      const job = await api("/api/curves/all/jobs", request);
       if (state.fullPanels[tag] !== item || item.key !== fullPanelKey(tag)) {
         await api("/api/curves/all/jobs/" + job.id + "/cancel", {}); return;
       }
@@ -1386,7 +1639,7 @@
     return window.ExpmanConfigurations.orderedRows(state.comparison ? state.comparison.rows : [], state.configOrder)
       .filter(row => row.kind === "scalar" || state.showIgnored || !(row.ignored || window.ExpmanConfigurations.ignoredPath(row.key, patterns)))
       .filter(row => row.kind === "scalar" || !state.diffOnly || row.different)
-      .filter(row => (row.key + (row.kind === "scalar" ? " " + window.ExpmanConfigurations.description(row.scalar) : "")).toLowerCase().includes(state.configQuery.trim().toLowerCase()));
+      .filter(row => (row.key + (row.kind === "scalar" ? " " + window.ExpmanConfigurations.description(row.scalar) : " " + ((configDisplaySpec(row.key) || {}).name || ""))).toLowerCase().includes(state.configQuery.trim().toLowerCase()));
   }
 
   function updateConfigExclusions(update, afterSave) {
@@ -1455,21 +1708,26 @@
     if (state.tab === "configs") renderConfigTable();
   }
 
-  function configCellText(field, cell) {
+  function configDisplaySpec(key) {
+    return has(state.configDisplay, key) ? state.configDisplay[key] : null;
+  }
+
+  function configCellText(field, cell, mapped = true) {
     if (field.pending) return "loading…";
     if (!cell || !cell.present) return "";
-    return field.kind === "scalar" ? number(cell.value) : configValue(cell.value);
+    return field.kind === "scalar" ? number(cell.value) : mapped ? window.ExpmanConfigurations.displayValue(cell.value, configDisplaySpec(field.key), configValue) : configValue(cell.value);
   }
 
   function configHeader(field, labels, scalarLabels) {
     const scalar = field.kind === "scalar", key = window.ExpmanConfigurations.rowId(field);
     const patterns = state.workspace && state.workspace.state ? state.workspace.state.ignored_configs || [] : [];
     const ignored = !scalar && (field.ignored || window.ExpmanConfigurations.ignoredPath(field.key, patterns));
-    const name = state.configFullNames ? field.key : (scalar ? scalarLabels : labels).get(field.key) || field.key;
+    const custom = !scalar && configDisplaySpec(field.key);
+    const name = custom && custom.name || (state.configFullNames ? field.key : (scalar ? scalarLabels : labels).get(field.key) || field.key);
     const tooltip = scalar ? window.ExpmanConfigurations.scalarTooltip(field.scalar, window.ExpmanAppearance.normalize(state.workspace.settings.appearance).scalar_color) : field.key;
     const controls = scalar
       ? `<button class="text-button" data-action="edit-config-scalar" data-value="${escape(field.scalar.id)}">Edit</button><button class="icon-button" data-action="remove-config-scalar" data-value="${escape(field.scalar.id)}" aria-label="Remove scalar ${escape(field.key)}" title="Remove this scalar comparison">×</button>`
-      : `<input type="checkbox" class="config-include" data-config-include="${escape(field.key)}" ${ignored ? "" : "checked"} aria-label="Include configuration ${escape(field.key)}" title="${ignored ? "Check to include this configuration; removes matching exclusions and restores other configurations covered by those rules" : "Uncheck to ignore this configuration"}">`;
+      : `<input type="checkbox" class="config-include" data-config-include="${escape(field.key)}" ${ignored ? "" : "checked"} aria-label="Include configuration ${escape(field.key)}" title="${ignored ? "Check to include this configuration; removes matching exclusions and restores other configurations covered by those rules" : "Uncheck to ignore this configuration"}"><button class="text-button" data-action="config-display" data-value="${escape(field.key)}" aria-label="Customize text for ${escape(field.key)}" title="Customize column name and value text${custom ? ' · customized' : ''}">Text</button>`;
     return `<th scope="col" class="${ignored ? "config-field-ignored" : ""}" data-config-key="${escape(key)}" data-config-heading="${escape(key)}"><div class="config-field-heading"><div class="config-field-actions"><button class="config-path-drag" type="button" draggable="true" data-config-drag="${escape(key)}" title="Drag to reorder columns · Alt+←/→ to move" aria-label="Reorder ${escape(field.key)}"><span aria-hidden="true">⠿</span></button>${controls}</div><code class="mono config-path-text" title="${escape(tooltip)}">${escape(name)}</code></div>${configResizeHandle(key, field.key)}</th>`;
   }
 
@@ -1533,6 +1791,7 @@
       <label><input type="checkbox" id="show-ignored" ${state.showIgnored ? "checked" : ""}> Show ignored</label>
       <button class="button compact" data-action="ignored">Manage exclusions</button>
       <button class="button compact" data-action="add-config-scalar" ${!scalarTags().length ? "disabled" : ""}>+ Add scalar</button>
+      <button class="button compact" data-action="config-display">Customize text</button>
       <span class="config-display-controls"><span>CONFIGURATION / SCALAR</span><label class="config-full-names"><input type="checkbox" id="config-full-names" ${state.configFullNames ? "checked" : ""}> Full names</label><button id="reset-config-widths" class="icon-button" data-action="reset-config-widths" title="Reset column widths" aria-label="Reset column widths" ${Object.keys(state.configColumnWidths).length ? "" : "disabled"}>↺</button></span>
       <button class="button compact" data-action="reset-config-order" ${state.configOrder.length ? "" : "disabled"}>Reset field order</button>
       <button class="button compact push" data-action="compare-csv">Export CSV ↓</button>
@@ -1621,6 +1880,7 @@
   }
 
   document.addEventListener("pointerdown", event => {
+    if (state.timeReferenceOpen && !event.target.closest("#time-reference-picker")) closeTimeReference();
     const handle = event.target.closest && event.target.closest("[data-config-resize]");
     if (!handle || (event.button != null && event.button !== 0)) return;
     event.preventDefault();
@@ -1651,6 +1911,68 @@
 
   function clearConfigDrop() {
     document.querySelectorAll(".config-drop-before, .config-drop-after, .config-dragging").forEach(row => row.classList.remove("config-drop-before", "config-drop-after", "config-dragging"));
+  }
+
+  function configTextRule(rule) {
+    return `<div class="config-text-rule" data-config-text-rule><label class="field">Original value<input name="config_original" list="config-observed-values" maxlength="80000" value="${escape(rule ? window.ExpmanConfigurations.valueKey(rule.value) : "")}" placeholder="JSON value or text"></label><label class="field">Display text<input name="config_replacement" maxlength="4000" value="${escape(rule ? rule.text : "")}" placeholder="Custom text; may be empty"></label><button type="button" class="icon-button" data-action="remove-config-text-rule" aria-label="Remove value mapping" title="Remove this mapping">×</button></div>`;
+  }
+
+  function renderConfigDisplayEditor() {
+    const editing = state.configDisplayEditing;
+    if (!editing) return;
+    const entry = has(editing.draft, editing.key) ? editing.draft[editing.key] : {name: "", values: []};
+    const values = new Map();
+    state.runs.filter(run => state.selected.has(run.id) && has(run.config || {}, editing.key)).forEach(run => {
+      const value = run.config[editing.key]; values.set(window.ExpmanConfigurations.valueKey(value), value);
+    });
+    dialog("Customize configuration text", `<label class="field">Configuration path<select id="config-display-key">${editing.keys.map(key => option(key, key, editing.key)).join("")}</select></label>
+      <label class="field">Column name<input name="config_display_name" maxlength="4000" value="${escape(entry.name)}" placeholder="Use automatic name"></label>
+      <p>A custom name replaces the automatic short or full name. Tooltips retain original paths and values. Comparisons, filters, and CSV exports use original data.</p>
+      <p>Map exact values below. Choose a suggested value, enter JSON, or use plain text. Use <code>1</code> for a number and <code>"1"</code> for a string.</p>
+      <datalist id="config-observed-values">${Array.from(values.keys()).sort().slice(0, 1000).map(value => `<option value="${escape(value)}"></option>`).join("")}</datalist>
+      <div id="config-text-rules">${entry.values.length ? entry.values.map(configTextRule).join("") : configTextRule()}</div>
+      <div class="toolbar"><button type="button" class="button compact" data-action="add-config-text-rule">+ Add value mapping</button><button type="button" class="button compact" data-action="reset-config-text">Reset this field</button></div>
+      <p id="config-display-error" class="notice warning" role="alert" hidden></p>`, "config-display");
+  }
+
+  function configDisplayDialog(key = "") {
+    const draft = JSON.parse(JSON.stringify(state.configDisplay));
+    const keys = Array.from(new Set(state.runs.filter(run => state.selected.has(run.id)).flatMap(run => Object.keys(run.config || {})).concat(Object.keys(draft)))).sort();
+    if (!keys.length) { notify("Select experiments with configuration fields to customize their text"); return; }
+    state.configDisplayEditing = {draft, keys, key: keys.includes(key) ? key : keys[0]};
+    renderConfigDisplayEditor();
+  }
+
+  function collectConfigDisplay() {
+    const editing = state.configDisplayEditing, form = byId("dialog").querySelector('[data-form="config-display"]');
+    if (!editing || !form) return false;
+    const error = byId("config-display-error"); error.hidden = true;
+    try {
+      const name = form.querySelector('[name="config_display_name"]').value.trim(), values = [], seen = new Set();
+      for (const row of form.querySelectorAll("[data-config-text-rule]")) {
+        const source = row.querySelector('[name="config_original"]').value, text = row.querySelector('[name="config_replacement"]').value;
+        if (!source && !text) continue;
+        if (!source.trim()) throw new Error('Enter an original value; use "" for an empty string');
+        let value;
+        try { value = JSON.parse(source); } catch (parseError) { value = source; }
+        const identity = window.ExpmanConfigurations.valueKey(value);
+        if (seen.has(identity)) throw new Error("Each original value can have only one display mapping");
+        seen.add(identity); values.push({value, text});
+      }
+      if (values.length > 1000) throw new Error("Use at most 1,000 mappings per configuration path");
+      if (name || values.length) editing.draft = {...editing.draft, [editing.key]: {name, values}};
+      else delete editing.draft[editing.key];
+      return true;
+    } catch (failure) { error.textContent = failure.message; error.hidden = false; return false; }
+  }
+
+  function saveConfigDisplay() {
+    if (!collectConfigDisplay()) return;
+    state.configDisplay = window.ExpmanConfigurations.displayPreferences(state.configDisplayEditing.draft);
+    state.configDisplayEditing = null;
+    byId("dialog").close();
+    if (state.tab === "configs") renderConfigTable();
+    remember(); notify("Configuration display text saved");
   }
 
   function scalarModeOptions(tag, mode) {
@@ -1752,7 +2074,7 @@
   function relationshipRequest() {
     return {experiment_ids: ids().sort(), metric: relationshipMetric(), direction: state.direction,
       condition_scope: state.associationScope, configuration_differences_only: state.diffOnly, configuration_query: state.configQuery.trim(),
-      categorical_conditions: state.categoricalConditions.slice().sort(), missing_conditions: state.missingConditions.slice().sort(), separate_null_conditions: state.separateNullConditions.slice().sort(),
+      categorical_conditions: state.categoricalConditions.slice().sort(), excluded_missing_conditions: state.excludedMissingConditions.slice().sort(), separate_null_conditions: state.separateNullConditions.slice().sort(),
       ...state.analysisWindow, ...relationshipSummary(),
       ...(state.summaryTags.includes(relationshipMetric()) ? {start_step: null, end_step: null} : {})};
   }
@@ -1894,15 +2216,20 @@
     await renderParallel();
   }
 
+  function conditionDisplayData(data) {
+    return {...data, categorical_conditions: state.categoricalConditions, missing_conditions: null,
+      excluded_missing_conditions: state.excludedMissingConditions, separate_null_conditions: state.separateNullConditions};
+  }
+
   async function renderCondition() {
     if (!state.analysis || !byId("condition-chart")) return;
     prepareExperimentColors();
     const serial = state.serial, data = state.analysis;
-    const grouped = window.ExpmanRelationships.condition({...data, categorical_conditions: state.categoricalConditions, missing_conditions: state.missingConditions, separate_null_conditions: state.separateNullConditions}, state.condition);
+    const grouped = window.ExpmanRelationships.condition(conditionDisplayData(data), state.condition);
     const active = Boolean(state.condition && data.records.length);
     byId("condition-type").value = state.categoricalConditions.includes(state.condition) ? "categorical" : "auto";
     byId("condition-type").disabled = !active;
-    byId("condition-missing").checked = state.missingConditions.includes(state.condition);
+    byId("condition-missing").checked = grouped.includeMissing;
     byId("condition-missing").disabled = !active;
     byId("condition-merge-null").checked = !state.separateNullConditions.includes(state.condition);
     byId("condition-merge-null").disabled = !active || !grouped.includeMissing;
@@ -1945,7 +2272,7 @@
     byId("parallel-error").hidden = true;
     if (element.removeListener && element.expmanBrushHandler) element.removeListener("plotly_restyle", element.expmanBrushHandler);
     element.expmanBrushHandler = null;
-    const built = window.ExpmanRelationships.build({...data, categorical_conditions: state.categoricalConditions, missing_conditions: state.missingConditions, separate_null_conditions: state.separateNullConditions}, state.parallelKeys, data.metric || relationshipMetric() || "Outcome");
+    const built = window.ExpmanRelationships.build(conditionDisplayData(data), state.parallelKeys, data.metric || relationshipMetric() || "Outcome");
     if (!built.records.length || !state.parallelKeys.length) {
       if (window.Plotly) Plotly.purge(element);
       element.innerHTML = empty(built.records.length ? "Choose varying dimensions" : "No outcomes to plot", built.records.length ? "Use Dimensions or Reset dimensions to choose configuration conditions. Choose All configs to expand the available paths." : "Select experiments with values for the chosen outcome metric.");
@@ -1973,9 +2300,122 @@
     }
   }
 
+  function onsetControls() {
+    const time = state.time;
+    return `<label>Smoothing span <input required type="number" id="onset-smoothing" min="0" step="any" value="${time.onset_smoothing}"></label>
+      <label>Sustain span <input required type="number" id="onset-duration" min="0.000001" step="any" value="${time.onset_duration}"></label>
+      <label>Onset threshold <input required type="number" id="onset-threshold" min="1" step="any" value="${time.onset_threshold}" title="Departure from the preceding baseline in robust noise units"></label>
+      <label>Min |correlation| <input required type="number" id="onset-min-correlation" min="0" max="1" step="any" value="${time.onset_min_correlation}"></label>
+      <details class="onset-options"><summary>Baseline and matching settings</summary><div class="toolbar">
+      <label>Baseline from <input type="number" id="onset-baseline-start" step="any" value="${time.onset_baseline_start == null ? "" : time.onset_baseline_start}" placeholder="Automatic"></label>
+      <label>Baseline to <input type="number" id="onset-baseline-end" step="any" value="${time.onset_baseline_end == null ? "" : time.onset_baseline_end}" placeholder="From"></label>
+      <label>Min |change correlation| <input required type="number" id="onset-min-change-correlation" min="0" max="1" step="any" value="${time.onset_min_change_correlation}"></label></div>
+      <p>Spans use the selected axis units. From/To selects the change interval. An automatic baseline uses the preceding half-interval; without From, it uses the first quarter of the reference range. Only preceding observations fit the baseline. Continuous curves use median/MAD noise; binary curves use a smoothed Bernoulli baseline.</p></details>`;
+  }
+
+  function timeEmptyTitle() {
+    return state.time.mode === "onsets" ? "Compare related changes and onset order" : state.time.mode === "periodicity" ? "Discover possible periodic behavior" : "Investigate events across curves";
+  }
+
+  function updateTimeReference(reset = false) {
+    const input = byId("time-reference"), list = byId("time-reference-list"), menu = byId("time-reference-menu"), time = state.time;
+    if (!input || !list || !menu) return;
+    const query = state.timeReferenceQuery.trim().toLowerCase(), matches = time.tags.filter(tag => tag.toLowerCase().includes(query));
+    const retained = Boolean(time.reference && time.tags.includes(time.reference) && !matches.includes(time.reference));
+    const automatic = time.mode === "onsets" ? "Choose a reference curve" : "Automatic · strongest activity";
+    const choices = [{value: "", text: automatic}, ...(retained ? [{value: time.reference, text: time.reference + " (selected)"}] : []), ...matches.map(tag => ({value: tag, text: tag}))];
+    list.expmanChoices = choices;
+    if (reset) {
+      const value = query ? matches[0] : time.reference;
+      state.timeReferenceIndex = value == null ? -1 : choices.findIndex(choice => choice.value === value);
+    }
+    if (state.timeReferenceIndex >= choices.length) state.timeReferenceIndex = -1;
+    input.value = state.timeReferenceOpen ? state.timeReferenceQuery : time.reference;
+    input.placeholder = automatic;
+    input.title = time.reference || automatic;
+    input.dataset.referenceValue = time.reference;
+    input.setAttribute("aria-expanded", String(state.timeReferenceOpen));
+    if (state.timeReferenceOpen && state.timeReferenceIndex >= 0) input.setAttribute("aria-activedescendant", "time-reference-option-" + state.timeReferenceIndex);
+    else input.removeAttribute("aria-activedescendant");
+    menu.hidden = !state.timeReferenceOpen;
+    list.innerHTML = choices.map((choice, index) => `<div id="time-reference-option-${index}" role="option" aria-selected="${choice.value === time.reference}" data-time-reference-choice="${escape(choice.value)}"${index === state.timeReferenceIndex ? ' class="active"' : ""} title="${escape(choice.text)}">${escape(choice.text)}</div>`).join("");
+    byId("time-reference-count").textContent = (matches.length ? `${matches.length} matching ${matches.length === 1 ? "curve" : "curves"}` : "No matching curves") + (retained ? " · selected reference retained" : "");
+    if (state.timeReferenceOpen) {
+      const bounds = byId("time-reference-picker").getBoundingClientRect(), width = Math.min(480, window.innerWidth - 24);
+      const above = window.innerHeight - bounds.bottom < 200 && bounds.top > 200;
+      menu.style.width = width + "px";
+      menu.style.left = Math.max(12 - bounds.left, Math.min(0, window.innerWidth - 12 - bounds.left - width)) + "px";
+      menu.style.top = above ? "auto" : "calc(100% + 4px)";
+      menu.style.bottom = above ? "calc(100% + 4px)" : "auto";
+      list.style.maxHeight = Math.max(64, Math.min(260, (above ? bounds.top : window.innerHeight - bounds.bottom) - 50)) + "px";
+      const active = byId("time-reference-option-" + state.timeReferenceIndex);
+      if (active) active.scrollIntoView({block: "nearest"});
+    }
+  }
+
+  function openTimeReference() {
+    if (state.timeReferenceOpen) return;
+    state.timeReferenceOpen = true; state.timeReferenceQuery = "";
+    updateTimeReference(true);
+  }
+
+  function closeTimeReference() {
+    state.timeReferenceOpen = false; state.timeReferenceQuery = ""; state.timeReferenceIndex = -1;
+    updateTimeReference();
+  }
+
+  async function chooseTimeReference(value) {
+    if (value && !state.time.tags.includes(value)) return;
+    if (state.time.reference === value) { closeTimeReference(); return; }
+    const cancellation = cancelTime(), generation = state.timeGeneration;
+    state.time.reference = value;
+    closeTimeReference(); updateTimeSettings();
+    try { await cancellation; } catch (error) { if (generation === state.timeGeneration) { state.timeError = "Could not confirm cancellation: " + error.message; showTimeError(); } }
+  }
+
+  function bindTimeReference() {
+    const picker = byId("time-reference-picker"), input = byId("time-reference");
+    input.addEventListener("focus", openTimeReference);
+    input.addEventListener("input", () => {
+      state.timeReferenceOpen = true; state.timeReferenceQuery = input.value;
+      updateTimeReference(true);
+    });
+    picker.addEventListener("pointerdown", event => {
+      if (event.target.closest("[data-time-reference-choice], [data-time-reference-toggle]")) event.preventDefault();
+    });
+    picker.addEventListener("click", event => {
+      const choice = event.target.closest("[data-time-reference-choice]");
+      if (choice) { execute(() => chooseTimeReference(choice.dataset.timeReferenceChoice)); return; }
+      if (event.target.closest("[data-time-reference-toggle]")) {
+        if (state.timeReferenceOpen) closeTimeReference();
+        else { input.focus(); openTimeReference(); }
+      } else if (event.target === input) openTimeReference();
+    });
+    picker.addEventListener("focusout", event => { if (!picker.contains(event.relatedTarget)) closeTimeReference(); });
+    input.addEventListener("keydown", event => {
+      if (event.isComposing) return;
+      if (["ArrowDown", "ArrowUp"].includes(event.key)) {
+        event.preventDefault();
+        if (!state.timeReferenceOpen) { openTimeReference(); return; }
+        const count = byId("time-reference-list").expmanChoices.length;
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        state.timeReferenceIndex = state.timeReferenceIndex < 0 ? direction > 0 ? 0 : count - 1 : (state.timeReferenceIndex + direction + count) % count;
+        updateTimeReference();
+      } else if (event.key === "Enter" && state.timeReferenceOpen) {
+        event.preventDefault();
+        const choice = byId("time-reference-list").expmanChoices[state.timeReferenceIndex];
+        if (choice) execute(() => chooseTimeReference(choice.value));
+      } else if (["Escape", "Tab"].includes(event.key) && state.timeReferenceOpen) {
+        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); }
+        closeTimeReference();
+      }
+    });
+  }
+
   async function renderTime(serial) {
     if (!state.time.experiment || !state.runs.some(item => item.id === state.time.experiment)) state.time.experiment = ids()[0] || (state.runs[0] && state.runs[0].id) || "";
     if (!state.time.experiment) { byId("view").innerHTML = empty("No experiments", "Point Expman at a directory containing TensorBoard event files."); return; }
+    if (state.timeReferenceExperiment !== state.time.experiment) { state.timeReferenceQuery = ""; state.timeReferenceOpen = false; state.timeReferenceIndex = -1; state.timeReferenceExperiment = state.time.experiment; }
     if (state.time.loadedExperiment !== state.time.experiment) {
       byId("view").innerHTML = loading("Discovering scalar curves for this experiment…");
       const result = await api("/api/metrics", {experiment_ids: [state.time.experiment]});
@@ -1985,20 +2425,25 @@
       state.time.loadedExperiment = state.time.experiment;
       state.timeData = null;
     }
-    const time = state.time, periodic = time.mode === "periodicity";
+    const time = state.time, periodic = time.mode === "periodicity", onsets = time.mode === "onsets";
     const matched = window.ExpmanSignals.select(time.available, time.include, time.exclude);
     time.tags = matched;
     if (!matched.includes(time.reference)) time.reference = "";
     const running = Boolean(state.timeStarting || state.timeJob);
-    byId("view").innerHTML = `<div class="toolbar"><label>Experiment <select id="time-experiment">${state.runs.map(item => option(item.id, item.name, time.experiment)).join("")}</select></label><label>Investigation <select id="time-mode">${option("events", "Events and timing", time.mode)}${option("periodicity", "Periodic behavior", time.mode)}</select></label><label>Reference <select id="time-reference">${option("", "Automatic · strongest activity", time.reference)}${matched.map(tag => option(tag, tag, time.reference)).join("")}</select></label><button class="button primary compact push" id="analyze-time-button" data-action="analyze-time" ${running ? "disabled" : ""}>Analyze ${matched.length} curves</button></div><div class="time-patterns"><label class="field">Include tag patterns<textarea id="time-include" rows="2" placeholder="*">${escape(time.include.join("\n"))}</textarea></label><label class="field">Exclude tag patterns<textarea id="time-exclude" rows="2" placeholder="*/learning_rate&#10;*debug*">${escape(time.exclude.join("\n"))}</textarea></label><p class="muted" id="time-scope-note">All scalar curves by default. One case-sensitive glob per line: * any text, ? one character, [abc] a set. Exclusions take priority. ${matched.length} of ${time.available.length} curves match.</p></div><div class="toolbar"><label>Axis <select id="time-axis">${[["step", "Training step"], ["relative", "Elapsed seconds"], ["wall", "Unix seconds"]].map(([key, text]) => option(key, text, time.x_axis)).join("")}</select></label><label>From <input type="number" id="time-start" value="${time.start == null ? "" : time.start}" placeholder="Start"></label><label>To <input type="number" id="time-end" value="${time.end == null ? "" : time.end}" placeholder="End"></label><label>Binary context <input type="number" id="binary-window" min="31" max="100001" step="1" value="${time.binary_window}" title="Context in logged observations for 0/1 curves; default 1001, clipped to available history"></label>${periodic ? `<label>Min period <input type="number" id="min-period" min="0" value="${time.min_period == null ? "" : time.min_period}" placeholder="Auto"></label><label>Max period <input type="number" id="max-period" min="0" value="${time.max_period == null ? "" : time.max_period}" placeholder="Auto"></label><label>Phase period <input type="number" id="phase-period" min="0" value="${time.phase_period == null ? "" : time.phase_period}" placeholder="Top peak"></label><label><input type="checkbox" id="period-detrend" ${time.detrend ? "checked" : ""}> Remove trend</label><label><input type="checkbox" id="period-windowed" ${time.windowed ? "checked" : ""}> Moving windows</label>` : `<label>Detector <select id="event-detector">${option("spike", "Spikes and dips", time.detector)}${option("change", "Abrupt changes", time.detector)}</select></label><label title="Compare with the expected cycle phase and normal variation between cycles"><input type="checkbox" id="event-period-aware" ${time.period_aware !== false ? "checked" : ""}> Account for periodic fluctuation</label><label>Threshold · event score <input title="Minimum absolute event score. Continuous curves use median/MAD; binary curves use a smoothed Bernoulli model with a long context" type="number" id="event-threshold" min="1" step="0.5" value="${time.threshold}"></label><label>Continuous window <input title="Local median/MAD window for continuous-valued curves; binary curves use Binary context" type="number" id="event-window" min="5" max="501" step="2" value="${time.window}"></label><label>Match tolerance <input type="number" id="event-tolerance" min="0" value="${time.tolerance}"></label><label>Max lag <input type="number" id="event-max-lag" min="0" value="${time.max_lag}"></label>`}</div><div id="time-progress" class="notice" role="status" ${running ? "" : "hidden"}><div class="toolbar"><strong id="time-progress-text">Starting analysis…</strong><button class="button compact push" data-action="cancel-time">Cancel</button></div><progress id="time-progress-bar" max="100" value="0" aria-label="Time-series analysis progress"></progress><div class="muted" id="time-progress-metric"></div></div><div id="time-error" class="notice warning" role="alert" hidden></div><div id="time-results"></div>`;
-    updateTimeStatus();
+    const referenceFocused = document.activeElement && document.activeElement.id === "time-reference";
+    const referenceDraft = state.timeReferenceOpen ? {query: state.timeReferenceQuery, index: state.timeReferenceIndex} : null;
+    byId("view").innerHTML = `<div class="toolbar"><label>Experiment <select id="time-experiment">${state.runs.map(item => option(item.id, item.name, time.experiment)).join("")}</select></label><label>Investigation <select id="time-mode">${option("events", "Events and timing", time.mode)}${option("periodicity", "Periodic behavior", time.mode)}${option("onsets", "Related changes and onsets", time.mode)}</select></label><div class="time-reference-field"><label for="time-reference">Reference</label><div id="time-reference-picker" class="time-reference-picker"><input id="time-reference" type="text" role="combobox" aria-label="Reference curve" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" aria-controls="time-reference-list" autocomplete="off" spellcheck="false"><button type="button" class="time-reference-toggle" data-time-reference-toggle aria-label="Show reference curves" tabindex="-1">▾</button><div id="time-reference-menu" class="time-reference-menu" hidden><div id="time-reference-list" role="listbox" aria-label="Reference curves"></div><div id="time-reference-count" class="muted" role="status" aria-live="polite"></div></div></div></div><button class="button primary compact push" id="analyze-time-button" data-action="analyze-time" ${running ? "disabled" : ""}>Analyze ${matched.length} curves</button></div><div class="time-patterns"><label class="field">Include tag patterns<textarea id="time-include" rows="2" placeholder="*">${escape(time.include.join("\n"))}</textarea></label><label class="field">Exclude tag patterns<textarea id="time-exclude" rows="2" placeholder="*/learning_rate&#10;*debug*">${escape(time.exclude.join("\n"))}</textarea></label><p class="muted" id="time-scope-note">All scalar curves by default. One case-sensitive glob per line: * any text, ? one character, [abc] a set. Exclusions take priority. ${matched.length} of ${time.available.length} curves match.</p></div><div class="toolbar"><label>Axis <select id="time-axis">${[["step", "Training step"], ["relative", "Elapsed seconds"], ["wall", "Unix seconds"]].map(([key, text]) => option(key, text, time.x_axis)).join("")}</select></label><label>From <input type="number" id="time-start" value="${time.start == null ? "" : time.start}" placeholder="Start"></label><label>To <input type="number" id="time-end" value="${time.end == null ? "" : time.end}" placeholder="End"></label>${onsets ? onsetControls() : `<label>Binary context <input type="number" id="binary-window" min="31" max="100001" step="1" value="${time.binary_window}" title="Context in logged observations for 0/1 curves; default 1001, clipped to available history"></label>`}${onsets ? "" : periodic ? `<label>Min period <input type="number" id="min-period" min="0" value="${time.min_period == null ? "" : time.min_period}" placeholder="Auto"></label><label>Max period <input type="number" id="max-period" min="0" value="${time.max_period == null ? "" : time.max_period}" placeholder="Auto"></label><label>Phase period <input type="number" id="phase-period" min="0" value="${time.phase_period == null ? "" : time.phase_period}" placeholder="Top peak"></label><label><input type="checkbox" id="period-detrend" ${time.detrend ? "checked" : ""}> Remove trend</label><label><input type="checkbox" id="period-windowed" ${time.windowed ? "checked" : ""}> Moving windows</label>` : `<label>Detector <select id="event-detector">${option("spike", "Spikes and dips", time.detector)}${option("change", "Abrupt changes", time.detector)}</select></label><label title="Compare with the expected cycle phase and normal variation between cycles"><input type="checkbox" id="event-period-aware" ${time.period_aware !== false ? "checked" : ""}> Account for periodic fluctuation</label><label>Threshold · event score <input title="Minimum absolute event score. Continuous curves use median/MAD; binary curves use a smoothed Bernoulli model with a long context" type="number" id="event-threshold" min="1" step="0.5" value="${time.threshold}"></label><label>Continuous window <input title="Local median/MAD window for continuous-valued curves; binary curves use Binary context" type="number" id="event-window" min="5" max="501" step="2" value="${time.window}"></label><label>Match tolerance <input type="number" id="event-tolerance" min="0" value="${time.tolerance}"></label><label>Max lag <input type="number" id="event-max-lag" min="0" value="${time.max_lag}"></label>`}</div><div id="time-progress" class="notice" role="status" ${running ? "" : "hidden"}><div class="toolbar"><strong id="time-progress-text">Starting analysis…</strong><button class="button compact push" data-action="cancel-time">Cancel</button></div><progress id="time-progress-bar" max="100" value="0" aria-label="Time-series analysis progress"></progress><div class="muted" id="time-progress-metric"></div></div><div id="time-error" class="notice warning" role="alert" hidden></div><div id="time-results"></div>`;
+    bindTimeReference();
+    if (referenceDraft) { state.timeReferenceOpen = true; state.timeReferenceQuery = referenceDraft.query; state.timeReferenceIndex = referenceDraft.index; }
+    updateTimeReference(); updateTimeStatus();
+    if (referenceFocused) byId("time-reference").focus({preventScroll: true});
     if (running) { if (!state.timeStarting && state.timeJob) execute(() => pollTimeJob(state.timeJob.id)); return; }
     if (state.timeError) return;
     if (!state.timeData) {
-      byId("time-results").innerHTML = empty(periodic ? "Discover possible periodic behavior" : "Investigate events across curves", "Click Analyze to investigate every matching scalar curve. Results are browsable in small chart groups, and full analysis is available for export.");
+      byId("time-results").innerHTML = empty(timeEmptyTitle(), onsets ? "Choose a reference curve, set From/To around the change, and click Analyze. Results can be ordered by correlation or earliest sustained onset." : "Click Analyze to investigate every matching scalar curve. Results are browsable in small chart groups, and full analysis is available for export.");
       return;
     }
-    try { if (periodic) await renderPeriodicity(); else await renderEvents(); }
+    try { if (onsets) await renderOnsets(); else if (periodic) await renderPeriodicity(); else await renderEvents(); }
     catch (error) { state.timeError = "Could not display the analysis: " + error.message; showTimeError(); }
   }
 
@@ -2022,7 +2467,7 @@
     if (state.tab !== "time") return;
     const running = Boolean(state.timeStarting || state.timeJob), button = byId("analyze-time-button");
     if (button) {
-      button.disabled = running || !state.time.tags.length;
+      button.disabled = running || !state.time.tags.length || state.time.mode === "onsets" && !state.time.reference;
       button.textContent = state.timeStarting ? "Starting analysis…" : running ? "Analyzing…" : `Analyze ${state.time.tags.length} curves`;
     }
     if (state.timeStarting) {
@@ -2031,7 +2476,7 @@
     } else if (state.timeJob) showTimeProgress(state.timeJob);
     else {
       if (byId("time-progress")) byId("time-progress").hidden = true;
-      if (!state.timeData && byId("time-results")) byId("time-results").innerHTML = state.timeError ? "" : empty(state.time.mode === "periodicity" ? "Discover possible periodic behavior" : "Investigate events across curves", "Click Analyze to investigate every matching scalar curve. Results are browsable in small chart groups, and full analysis is available for export.");
+      if (!state.timeData && byId("time-results")) byId("time-results").innerHTML = state.timeError ? "" : empty(timeEmptyTitle(), "Click Analyze to investigate every matching scalar curve. Results are browsable in small chart groups, and full analysis is available for export.");
     }
     showTimeError();
   }
@@ -2042,7 +2487,7 @@
     if (!time.tags.includes(time.reference)) time.reference = "";
     state.timeData = null; state.timeError = ""; state.timePlotPage = 0;
     if (state.tab === "time") {
-      byId("time-reference").innerHTML = option("", "Automatic · strongest activity", time.reference) + time.tags.map(tag => option(tag, tag, time.reference)).join("");
+      updateTimeReference();
       byId("time-scope-note").textContent = `All scalar curves by default. One case-sensitive glob per line: * any text, ? one character, [abc] a set. Exclusions take priority. ${time.tags.length} of ${time.available.length} curves match.`;
       updateTimeStatus();
     }
@@ -2106,8 +2551,10 @@
     if (state.timeStarting) return;
     const time = state.time;
     if (!time.tags.length) { state.timeError = "No scalar curves match these patterns"; updateTimeStatus(); return; }
+    if (time.mode === "onsets" && !time.reference) { state.timeError = "Choose a reference curve for sustained-change analysis"; updateTimeStatus(); return; }
     const request = {kind: time.mode, experiment_id: time.experiment, include: time.include.slice(), exclude: time.exclude.slice(), reference: time.reference || null, x_axis: time.x_axis, start: time.start, end: time.end, binary_window: time.binary_window};
     if (time.mode === "events") Object.assign(request, {threshold: time.threshold, window: time.window, period_aware: time.period_aware, detector: time.detector, tolerance: time.tolerance, max_lag: time.max_lag});
+    else if (time.mode === "onsets") Object.keys(window.ExpmanOnsets.defaults).filter(key => !["onset_sort", "onset_show_all"].includes(key)).forEach(key => { request[key] = time[key]; });
     else Object.assign(request, {min_period: time.min_period, max_period: time.max_period, phase_period: time.phase_period, detrend: time.detrend, windowed: time.windowed});
     const cancellation = cancelTime(), generation = state.timeGeneration, key = JSON.stringify(request);
     state.timeStarting = true; state.timeRequestKey = key; state.timeData = null; state.timePlotPage = 0;
@@ -2132,14 +2579,48 @@
     }
   }
 
-  function timeDisplay(tags) {
+  function timeDisplay(tags, analyzedCount = tags.length) {
     const page = window.ExpmanPanels.page(tags, state.timePlotQuery || "", state.timePlotPage || 0, 8);
     state.timePlotPage = page.page;
-    return {tags: page.tags, html: `<div class="toolbar"><strong>${tags.length} curves analyzed</strong><label>Browse results <input id="time-result-filter" type="search" value="${escape(state.timePlotQuery || "")}" placeholder="Filter metric tags"></label><span class="muted">Showing ${page.from}–${page.to} of ${page.total} · reference: ${escape(state.timeData.reference || "none")}</span><button class="button compact push" data-action="time-prev" ${page.page ? "" : "disabled"}>← Previous</button><span>${page.page + 1} / ${page.pages}</span><button class="button compact" data-action="time-next" ${page.page + 1 < page.pages ? "" : "disabled"}>Next →</button><button class="button compact" data-action="time-export">Export all results ↓</button></div>`};
+    return {tags: page.tags, html: `<div class="toolbar"><strong>${analyzedCount} curves analyzed</strong><label>Browse results <input id="time-result-filter" type="search" value="${escape(state.timePlotQuery || "")}" placeholder="Filter metric tags"></label><span class="muted">Showing ${page.from}–${page.to} of ${page.total} · reference: ${escape(state.timeData.reference || "none")}</span><button class="button compact push" data-action="time-prev" ${page.page ? "" : "disabled"}>← Previous</button><span>${page.page + 1} / ${page.pages}</span><button class="button compact" data-action="time-next" ${page.page + 1 < page.pages ? "" : "disabled"}>Next →</button><button class="button compact" data-action="time-export">Export all results ↓</button></div>`};
   }
 
   function compareEventStrength(first, second) {
     return Math.abs(second.score) - Math.abs(first.score) || first.x - second.x || first.tag.localeCompare(second.tag);
+  }
+
+  function onsetRows() {
+    return window.ExpmanOnsets.rows(state.timeData || {}, state.time);
+  }
+
+  async function renderOnsets() {
+    const data = state.timeData, analysis = data.analysis, reference = data.reference_result;
+    const colors = window.ExpmanPanels.defaultColors(Object.keys(data.curves).sort()), metricColor = tag => colors[tag] || color(tag);
+    const rows = onsetRows(), display = timeDisplay(rows.map(row => row.tag), Object.keys(data.curves).length);
+    const visible = new Set(display.tags), shown = rows.filter(row => visible.has(row.tag));
+    const metrics = [data.reference, ...display.tags], onset = reference.onset;
+    const bracket = row => row.onset_bracket ? `Recorded observations bracket this crossing at ${number(row.onset_bracket[0])}–${number(row.onset_bracket[1])}; this is not a confidence interval` : row.status;
+    byId("time-results").innerHTML = `<div class="toolbar"><label>Sort results <select id="onset-sort">${option("correlation", "Correlation · strongest |r|", state.time.onset_sort)}${option("onset", "Onset · earliest first", state.time.onset_sort)}</select></label><label><input type="checkbox" id="onset-show-all" ${state.time.onset_show_all ? "checked" : ""}> Show unrelated curves</label><span>${analysis.related_curves} related candidates · ${data.rows.length} target curves</span><button class="button compact push" data-action="onsets-csv">Export results CSV ↓</button></div>
+      ${display.html}<div class="notice" id="onset-reference-summary"><span class="color-dot" style="background:${metricColor(data.reference)}"></span> <strong>Reference: ${escape(data.reference)}</strong> · ${onset == null ? escape(reference.status) + "; delays are unavailable" : "onset " + number(onset) + " · " + reference.direction}. Baseline ${number(analysis.baseline_start)}–${number(analysis.baseline_end)}; change interval ${number(analysis.start)}–${number(analysis.end)}. Grid spacing ${number(analysis.resolution)}; smoothing ${number(analysis.smoothing_span)}; sustain ${number(analysis.sustain_span)} ${escape(timeUnits().toLowerCase())}.</div>
+      <div class="card"><div class="table-wrap"><table id="onset-results-table"><thead><tr><th>METRIC</th><th title="Signed Pearson correlation of smoothed levels; correlation order uses the absolute value">CORRELATION r</th><th title="Signed Pearson correlation of adjacent changes on the common grid">CHANGE r</th><th>ONSET</th><th title="Target onset minus reference onset; negative means earlier">DELAY</th><th>CHANGE</th><th>STATUS</th></tr></thead><tbody>${shown.map(row => `<tr data-onset-tag="${escape(row.tag)}"><td><span class="color-dot" style="background:${metricColor(row.tag)}"></span> ${escape(row.tag)}</td><td class="mono" data-onset-correlation>${number(row.correlation)}</td><td class="mono">${number(row.change_correlation)}</td><td class="mono" title="${escape(bracket(row))}">${row.onset == null ? "—" : `<button class="text-button" data-action="focus-onset" data-value="${row.onset}">${number(row.onset)}</button>`}</td><td class="mono">${number(row.delay)}</td><td>${escape(row.direction || "—")}</td><td>${escape(row.status)}</td></tr>`).join("")}</tbody></table></div></div>
+      ${rows.length ? "" : empty("No matching related curves", "Lower the correlation limits, enable Show unrelated curves, or change the metric search.")}
+      <article class="card parallel-card"><header class="card-header"><div><h2 class="card-title">Aligned sustained changes</h2><div class="card-subtitle">EACH CURVE SCALED BY ITS DEPARTURE FROM BASELINE · REFERENCE ALWAYS SHOWN</div></div></header><div id="onset-curves" class="chart" style="height:420px"></div></article>
+      <article class="card parallel-card"><header class="card-header"><div><h2 class="card-title">Onset order</h2><div class="card-subtitle">DASHED LINE MARKS REFERENCE ONSET · NEGATIVE DELAY MEANS EARLIER</div></div></header><div id="onset-timeline" class="chart" style="height:${Math.max(230, metrics.length * 40 + 70)}px"></div></article>
+      <div class="notice">${escape(data.note)} Correlation order uses |r| and includes inverse changes. Gap and interval-start statuses indicate limited onset precision. Baselines and resampled plot values are exported with the analysis.</div>`;
+    const traces = [];
+    metrics.forEach(tag => {
+      const curve = data.curves[tag], scaled = window.ExpmanOnsets.normalized(curve, analysis.start, analysis.end);
+      traces.push({x: scaled.x, y: scaled.y, customdata: scaled.customdata, name: plotText(tag), type: "scatter", mode: "lines", line: {color: metricColor(tag), width: tag === data.reference ? 2.5 : 1.5}, hovertemplate: "Smoothed %{customdata[0]:.6g} · Resampled %{customdata[1]:.6g} · Baseline %{customdata[2]:.6g}<extra>%{fullData.name}</extra>"});
+      const row = tag === data.reference ? reference : shown.find(row => row.tag === tag);
+      const index = scaled.x.findIndex((value, index) => value === row.onset && scaled.y[index] != null);
+      if (index >= 0) traces.push({x: [row.onset], y: [scaled.y[index]], name: plotText(tag) + " onset", type: "scatter", mode: "markers", marker: {color: metricColor(tag), size: 10, symbol: "diamond"}, hovertemplate: `Onset %{x} · ${escape(row.direction || "")}<extra>%{fullData.name}</extra>`});
+    });
+    const shapes = onset == null ? [] : [{type: "line", x0: onset, x1: onset, y0: 0, y1: 1, yref: "paper", line: {color: "#555555", dash: "dash", width: 1}}];
+    await plot(byId("onset-curves"), traces, {showlegend: false, hovermode: "x unified", shapes, xaxis: {title: {text: timeUnits()}, range: [analysis.start, analysis.end]}, yaxis: {title: {text: "Scaled baseline deviation"}}});
+    await plot(byId("onset-timeline"), metrics.map((tag, index) => {
+      const row = tag === data.reference ? reference : shown.find(row => row.tag === tag);
+      return {x: row.onset == null ? [] : [row.onset], y: row.onset == null ? [] : [index], name: plotText(tag), type: "scatter", mode: "markers", marker: {color: metricColor(tag), size: 12, symbol: "diamond"}, hovertemplate: `Onset %{x} · ${escape(row.direction || "")} · Delay ${tag === data.reference ? "0" : number(row.delay)}<extra>%{fullData.name}</extra>`};
+    }), {showlegend: false, shapes, margin: {l: 200, r: 25, t: 15, b: 45}, xaxis: {title: {text: timeUnits()}, range: [analysis.start, analysis.end]}, yaxis: {tickvals: metrics.map((tag, index) => index), ticktext: metrics.map(tag => plotText(tag).slice(-36)), autorange: "reversed"}});
   }
 
   function eventScoreDetails(event) {
@@ -2529,7 +3010,7 @@
 
   async function refresh(background = false) {
     if (state.refreshing || state.busy || state.metricsLoading || state.jsonMetricLoading || state.configScalarJob || state.relationshipJob || state.relationshipStarting || state.configResizing) return;
-    if (background && (byId("dialog").open || byId("panel-dialog").open || state.combinedDrag || state.combinedFitting || state.configDragging)) return;
+    if (background && (byId("dialog").open || byId("panel-dialog").open || state.combinedDrag || state.combinedFitting || state.configDragging || Array.from(state.curveRefreshes.values()).some(item => item.current()))) return;
     state.refreshing = true;
     try {
       const result = await api("/api/refresh", {});
@@ -2624,6 +3105,8 @@
     "remove-panel": async value => { state.showAllPanels = false; state.panels = state.panels.filter(tag => tag !== value); await renderView(); },
     "expand-panel": expandPanel,
     "load-full-panel": loadFullPanel,
+    "refresh-panel-curves": refreshVisibleCurves,
+    "refresh-combined-curves": () => refreshVisibleCurves(null),
     "cancel-full-panel": cancelFullPanel,
     "close-expanded-panel": () => byId("panel-dialog").close(),
     "show-all-curves": showAllOverviewCurves,
@@ -2644,6 +3127,10 @@
     "config-next": () => { state.configPage += 1; renderConfigTable(); },
     "search-all-config-fields": async () => { state.showIgnored = true; state.diffOnly = false; state.configPage = 0; await renderView(); },
     "include-config-path": includeConfigPath,
+    "config-display": configDisplayDialog,
+    "add-config-text-rule": () => { const list = byId("config-text-rules"); list.insertAdjacentHTML("beforeend", configTextRule()); list.lastElementChild.querySelector("input").focus(); },
+    "remove-config-text-rule": (value, button) => button.closest("[data-config-text-rule]").remove(),
+    "reset-config-text": () => { if (state.configDisplayEditing) { delete state.configDisplayEditing.draft[state.configDisplayEditing.key]; renderConfigDisplayEditor(); } },
     "reset-config-order": () => { state.configOrder = []; state.configPage = 0; renderConfigTable(); remember(); },
     "reset-config-widths": () => { state.configColumnWidths = {}; renderConfigTable(); remember(); },
     "retry-config-scalars": () => { state.configScalarError = ""; return ensureConfigScalars(); },
@@ -2653,7 +3140,7 @@
     "ignored": exclusionsDialog,
     "ignore-key": value => setConfigIncluded(value, false),
     "raw-csv": value => { window.location.href = "/api/export/scalars.csv?ids=" + encodeURIComponent(ids().join(",")) + "&tag=" + encodeURIComponent(value); },
-    "compare-csv": () => { if (state.comparison) saveCSV("expman-config-comparison.csv", window.ExpmanConfigurations.comparisonRecords(state.comparison, configurationRows(), configCellText)); },
+    "compare-csv": () => { if (state.comparison) saveCSV("expman-config-comparison.csv", window.ExpmanConfigurations.comparisonRecords(state.comparison, configurationRows(), (field, cell) => configCellText(field, cell, false))); },
     "analysis-csv": () => { if (!state.analysis) return; const keys = Array.from(new Set(state.analysis.records.flatMap(record => Object.keys(record.config)))).sort(); saveCSV("expman-condition-analysis.csv", [["experiment", "metric", "reduction", "smoothing", "at_step", "outcome", "first_step", "last_step", ...keys], ...state.analysis.records.map(record => [record.name, state.analysis.metric, state.analysis.reduction, state.analysis.smoothing, state.analysis.at_step, record.result, record.first_step, record.last_step, ...keys.map(key => has(record.config, key) ? label(record.config[key]) : "(missing)")])]); },
     "analysis-window": () => { const settings = state.analysisWindow || {}, summary = relationshipSummary(); dialog("Outcome settings", `<p>Automatic summaries inherit the configured scalar’s mode, target step, and smoothing. Smoothed outcomes use complete history before the window or fixed-step interpolation. Clear an override to inherit it again.</p><label class="field">Start step<input type="number" name="start_step" value="${settings.start_step == null ? "" : settings.start_step}"></label><label class="field">End step<input type="number" name="end_step" value="${settings.end_step == null ? "" : settings.end_step}"></label><label class="field">Target step override<input type="number" name="at_step" placeholder="${summary.at_step == null ? "Required for fixed-step summaries" : summary.at_step}" value="${settings.at_step == null ? "" : settings.at_step}"></label><label class="field">Smoothing override<input type="number" name="smoothing" min="0" max="0.999" step="any" placeholder="${summary.smoothing}" value="${state.relationshipSmoothing == null ? "" : state.relationshipSmoothing}"></label>`, "analysis-window"); },
     "index-visible": async () => { if (state.indexing) return; state.indexing = true; try { const runs = visibleRuns(); for (let offset = 0; offset < runs.length; offset += 5) { const result = await api("/api/metrics", {experiment_ids: runs.slice(offset, offset + 5).map(item => item.id)}); mergeRuns(result.experiments, true); if (state.tab === "runs") renderRuns(); } notify("Visible experiment summaries loaded"); } finally { state.indexing = false; } },
@@ -2673,6 +3160,8 @@
     "focus-event": value => focusEvent(Number(value)),
     "phase-at-period": async value => { state.time.phase_period = Number(value); await analyzeTime(); },
     "time-export": () => { if (state.timeData) saveFile("expman-" + state.time.mode + ".json", JSON.stringify(state.timeData, null, 2)); },
+    "onsets-csv": () => { const query = (state.timePlotQuery || "").trim().toLowerCase(); saveCSV("expman-onsets.csv", [["metric", "correlation", "change_correlation", "onset", "onset_lower", "onset_upper", "delay", "direction", "status", "related"], ...onsetRows().filter(row => row.tag.toLowerCase().includes(query)).map(row => [row.tag, row.correlation, row.change_correlation, row.onset, row.onset_bracket && row.onset_bracket[0], row.onset_bracket && row.onset_bracket[1], row.delay, row.direction, row.status, row.related])]); },
+    "focus-onset": position => { if (byId("onset-curves")) { const span = Math.max(state.time.onset_duration * 3, state.timeData.analysis.resolution * 10); return Plotly.relayout(byId("onset-curves"), {"xaxis.range": [Number(position) - span, Number(position) + span]}); } },
     "events-csv": () => { if (state.timeData) saveCSV("expman-events.csv", [["metric", "position", "start", "end", "kind", "value", "baseline", "deviation", "score", "score_type", "context_window", "scale", "period", "baseline_type", "boundary_context"], ...state.timeData.timeline.slice().sort(compareEventStrength).map(event => [event.tag, event.x, event.start, event.end, event.kind, event.value, event.baseline, event.deviation, event.score, event.score_type || "mad", event.context_window, event.scale, event.period, event.baseline_type, event.boundary_context])]); },
     "exports": () => dialog("Export workspace data", '<p>Raw CSV downloads are available on each scalar panel. Configuration and relationship views export their displayed records. Time-series views export full results and settings.</p><p><a class="button" href="/api/export/workspace.json" download>Download annotations, groups, and exclusions ↓</a></p>'),
     "help": () => dialog("About this workspace", `<p>Expman reads TensorBoard events and YAML/JSON configurations from <code>${escape(state.workspace.logdir)}</code>. Renaming, archiving, notes, groups, exclusions, and saved views are stored in <code>${escape(state.workspace.state_file)}</code>.</p><p>User-wide settings are stored in <code>${escape(state.workspace.settings_file)}</code>.</p>${state.workspace.migrated_from ? `<p>Existing workspace state was copied from <code>${escape(state.workspace.migrated_from)}</code>. The original remains as a backup.</p>` : ""}<p>Choose runs in Experiments, then compare their curves, configurations, and outcomes. Time series investigates one experiment independently of the shared selection. TensorBoard provides the native logging plugins.</p><p>Use <kbd>/</kbd> to search and Escape to close dialogs. Auto refresh rescans every 30 seconds when requests are idle.</p>${state.workspace.warnings.length ? '<h3>Discovery warnings</h3>' + state.workspace.warnings.map(warning => `<div class="notice warning">${escape(warning)}</div>`).join("") : ""}<p><a href="/design" target="_blank" rel="noopener">Read the design document ↗</a></p>`)
@@ -2718,6 +3207,18 @@
 
   document.addEventListener("input", event => {
     const element = event.target;
+    if (element.id === "time-result-filter" && state.time.mode === "onsets") {
+      state.timePlotQuery = element.value; state.timePlotPage = 0;
+      window.clearTimeout(state.timeFilterTimer);
+      state.timeFilterTimer = window.setTimeout(() => execute(async () => {
+        if (state.tab !== "time" || state.time.mode !== "onsets" || !state.timeData) return;
+        const focused = document.activeElement && document.activeElement.id === "time-result-filter", position = element.selectionStart;
+        const pending = renderOnsets(), input = byId("time-result-filter");
+        if (focused && input) { input.focus(); if (position != null) input.setSelectionRange(position, position); }
+        await pending;
+      }), 200);
+      return;
+    }
     if (element.id === "combined-smoothing" && state.combinedPlot) {
       const value = optionalNumber(element.value);
       if (value != null && Number.isFinite(value) && value >= 0 && value <= .999) { state.combinedPlot.smoothing = value; remember(); execute(() => renderCombined(state.serial)); }
@@ -2741,15 +3242,8 @@
     }
     if (element.id === "panel-filter") {
       state.panelQuery = element.value;
-      state.panelPage = 0;
-      const position = element.selectionStart;
       window.clearTimeout(state.panelFilterTimer);
-      state.panelFilterTimer = window.setTimeout(() => execute(async () => {
-        if (state.tab !== "overview") return;
-        const pending = renderView(), input = byId("panel-filter");
-        if (input) { input.focus(); if (position != null) input.setSelectionRange(position, position); }
-        await pending;
-      }), 250);
+      state.panelFilterTimer = window.setTimeout(() => { if (state.tab === "overview") execute(renderView); }, 250);
     }
     if (element.id === "run-search") {
       state.query = element.value; renderChrome(); remember();
@@ -2776,6 +3270,14 @@
 
   document.addEventListener("change", event => execute(async () => {
     const element = event.target, identifier = element.id;
+    if (identifier === "onset-sort" || identifier === "onset-show-all") {
+      state.time[identifier === "onset-sort" ? "onset_sort" : "onset_show_all"] = identifier === "onset-sort" ? element.value : element.checked;
+      state.timePlotPage = 0; remember(); if (state.timeData) await renderOnsets(); return;
+    }
+    if (identifier === "config-display-key") {
+      if (!collectConfigDisplay()) { element.value = state.configDisplayEditing.key; return; }
+      state.configDisplayEditing.key = element.value; renderConfigDisplayEditor(); return;
+    }
     if (identifier === "named-view-choice") { await loadNamedView(element.value); return; }
     if (identifier === "selection-mode") {
       state.selectionMode = element.value === "filters" ? "filters" : "manual";
@@ -2858,12 +3360,16 @@
       try { await cancellation; } catch (error) { if (generation === state.timeGeneration) { state.timeError = "Could not confirm cancellation: " + error.message; showTimeError(); } }
       return;
     }
-    if (identifier === "time-result-filter") { state.timePlotQuery = element.value; state.timePlotPage = 0; await renderView(); return; }
+    if (identifier === "time-result-filter") {
+      if (state.time.mode === "onsets" && state.timePlotQuery === element.value) return;
+      state.timePlotQuery = element.value; state.timePlotPage = 0;
+      if (state.time.mode === "onsets") await renderOnsets(); else await renderView(); return;
+    }
     if (identifier === "condition-select") { state.condition = element.value; await renderCondition(); return; }
     if (["condition-type", "condition-missing", "condition-merge-null"].includes(identifier)) {
       if (!state.condition) return;
-      const key = identifier === "condition-type" ? "categoricalConditions" : identifier === "condition-missing" ? "missingConditions" : "separateNullConditions";
-      const enabled = identifier === "condition-type" ? element.value === "categorical" : identifier === "condition-missing" ? element.checked : !element.checked;
+      const key = identifier === "condition-type" ? "categoricalConditions" : identifier === "condition-missing" ? "excludedMissingConditions" : "separateNullConditions";
+      const enabled = identifier === "condition-type" ? element.value === "categorical" : !element.checked;
       state[key] = Array.from(new Set(state[key].filter(value => value !== state.condition).concat(enabled ? [state.condition] : [])));
       cancelRelationships(); remember(); await renderView(); return;
     }
@@ -2875,8 +3381,9 @@
     if (identifier === "group-mode") { state.options.group = element.value; if (element.value === "config" && !state.options.groupKeys.length) actions["group-keys"](); else await renderView(); return; }
     const commonControls = {"result-metric": "metric", "analysis-metric": "relationshipMetric", "association-scope": "associationScope", "run-sort": "sort", "baseline": "baseline", "reduction": "relationshipReduction", "direction": "direction", "diff-only": "diffOnly", "show-ignored": "showIgnored"};
     if (commonControls[identifier]) { state[commonControls[identifier]] = element.type === "checkbox" ? element.checked : element.value; state.configPage = 0; await renderView(); return; }
-    const timeControls = {"time-experiment": "experiment", "time-mode": "mode", "time-reference": "reference", "time-axis": "x_axis", "time-start": "start", "time-end": "end", "event-threshold": "threshold", "event-window": "window", "binary-window": "binary_window", "event-tolerance": "tolerance", "event-max-lag": "max_lag", "event-detector": "detector", "event-period-aware": "period_aware", "min-period": "min_period", "max-period": "max_period", "phase-period": "phase_period", "period-detrend": "detrend", "period-windowed": "windowed"};
+    const timeControls = {"time-experiment": "experiment", "time-mode": "mode", "time-axis": "x_axis", "time-start": "start", "time-end": "end", "event-threshold": "threshold", "event-window": "window", "binary-window": "binary_window", "event-tolerance": "tolerance", "event-max-lag": "max_lag", "event-detector": "detector", "event-period-aware": "period_aware", "onset-smoothing": "onset_smoothing", "onset-duration": "onset_duration", "onset-threshold": "onset_threshold", "onset-min-correlation": "onset_min_correlation", "onset-min-change-correlation": "onset_min_change_correlation", "onset-baseline-start": "onset_baseline_start", "onset-baseline-end": "onset_baseline_end", "min-period": "min_period", "max-period": "max_period", "phase-period": "phase_period", "period-detrend": "detrend", "period-windowed": "windowed"};
     if (timeControls[identifier]) {
+      if (identifier.startsWith("onset-") && element.type === "number" && !["onset-baseline-start", "onset-baseline-end"].includes(identifier) && (!Number.isFinite(optionalNumber(element.value)) || element.validity && !element.validity.valid)) { element.reportValidity(); return; }
       const cancellation = cancelTime(), generation = state.timeGeneration;
       state.time[timeControls[identifier]] = element.type === "number" ? optionalNumber(element.value) : element.type === "checkbox" ? element.checked : element.value;
       updateTimeSettings();
@@ -2892,6 +3399,7 @@
     const selectMatches = Boolean(event.submitter && event.submitter.dataset.selectMatches === "true");
     execute(async () => {
       const data = new FormData(form), type = form.dataset.form, choices = data.getAll("choices");
+      if (type === "config-display") { saveConfigDisplay(); return; }
       if (type === "new-view" || type === "rename-view") { await writeNamedView(String(data.get("view_name")), type === "rename-view" ? state.activeNamedView : "", type === "rename-view"); return; }
       if (type === "json-metrics") {
         await loadJSONMetrics(String(data.get("json_metric_paths") || "").split("\n").map(path => path.trim()).filter(Boolean));
@@ -3004,7 +3512,7 @@
         state.panels = saved.panels || []; state.metric = saved.metric || ""; state.columns = saved.columns || []; state.parallelKeys = saved.parallelKeys || [];
         state.baseline = typeof saved.baseline === "string" ? saved.baseline : "";
         state.associationScope = saved.associationScope === "all" ? "all" : "configurations";
-        for (const key of ["categoricalConditions", "missingConditions", "separateNullConditions"]) state[key] = Array.from(new Set((Array.isArray(saved[key]) ? saved[key] : []).filter(value => typeof value === "string" && value.length > 0 && value.length <= 4000))).slice(0, 2000);
+        for (const key of ["categoricalConditions", "excludedMissingConditions", "separateNullConditions"]) state[key] = Array.from(new Set((Array.isArray(saved[key]) ? saved[key] : []).filter(value => typeof value === "string" && value.length > 0 && value.length <= 4000))).slice(0, 2000);
         state.relationshipMetric = typeof saved.relationshipMetric === "string" ? saved.relationshipMetric : "";
         state.relationshipReduction = ["last", "last_smoothed", "best", "mean", "min", "max", "at_step", "smoothed_at_step"].includes(saved.relationshipReduction) ? saved.relationshipReduction : "";
         state.relationshipSmoothing = Number.isFinite(saved.relationshipSmoothing) && saved.relationshipSmoothing >= 0 && saved.relationshipSmoothing <= .999 ? saved.relationshipSmoothing : null;
@@ -3028,6 +3536,7 @@
         state.time.include = Array.isArray(state.time.include) ? state.time.include.filter(pattern => typeof pattern === "string") : ["*"];
           state.time.exclude = Array.isArray(state.time.exclude) ? state.time.exclude.filter(pattern => typeof pattern === "string") : [];
         }
+        Object.assign(state.time, window.ExpmanOnsets.preferences(state.time));
         if (saved.options) Object.assign(state.options, saved.options);
         if (!Number.isFinite(state.options.smoothing) || state.options.smoothing < 0 || state.options.smoothing > .999) state.options.smoothing = .4;
         state.combinedPlot = window.ExpmanCombined.preferences(saved.combinedPlot, state.options.smoothing);

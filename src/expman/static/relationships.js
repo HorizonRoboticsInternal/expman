@@ -7,9 +7,10 @@ window.ExpmanRelationships = (() => {
   const finite = value => typeof value === "number" && Number.isFinite(value);
   const records = data => (data.records || []).filter(record => finite(record.result));
   const keys = data => Array.isArray(data.condition_keys) ? data.condition_keys : Array.from(new Set(records(data).flatMap(record => Object.keys(record.config)))).sort();
+  const includesMissing = (data, key) => Boolean(key) && (!Array.isArray(data.missing_conditions) || data.missing_conditions.includes(key)) && !(data.excluded_missing_conditions || []).includes(key);
 
   function condition(data, key) {
-    const rows = records(data), includeMissing = (data.missing_conditions || []).includes(key);
+    const rows = records(data), includeMissing = includesMissing(data, key);
     const mergeNull = includeMissing && !(data.separate_null_conditions || []).includes(key);
     const entries = rows.filter(record => includeMissing || has(record.config, key)).map(record => {
       const missing = !has(record.config, key) || (mergeNull && record.config[key] === null);
@@ -71,7 +72,7 @@ window.ExpmanRelationships = (() => {
     })
       .concat({label: names.get(metric) || metric, values: rows.map(record => record.result)}),
     incomplete: rows.filter(record => selected.some(key => !has(record.config, key)
-      || ((data.missing_conditions || []).includes(key) && !(data.separate_null_conditions || []).includes(key) && record.config[key] === null))).length};
+      || (includesMissing(data, key) && !(data.separate_null_conditions || []).includes(key) && record.config[key] === null))).length};
   }
 
   function brushed(rows, dimensions) {

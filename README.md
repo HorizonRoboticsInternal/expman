@@ -26,9 +26,9 @@ Experiment selection is shared across Overview, Configurations, and Relationship
 
 - **Experiments:** find runs using search, configuration conditions, and path filters. Reuse named filters, organize groups, and maintain names, notes, tags, favorites, and archive state. Filtering preserves manual selections and identifies selected runs outside the filters.
 - **Overview:** compare scalar curves across experiments or groups. Browse metrics by tag hierarchy, smooth curves, inspect complete observations, and combine different metrics from one experiment with independent scaling.
-- **Configurations:** compare typed configuration values against a chosen baseline. Include scalar summaries at the latest or a fixed step, with optional smoothing. Exclude irrelevant configuration fields and highlight differences or metric extrema.
-- **Relationships:** explore associations between configuration choices and outcomes using ranked scores, scatter plots, and parallel coordinates. Outcomes can inherit a configured scalar's metric and summary settings. Numeric conditions can be treated as categories, with optional missing/null groups.
-- **Time series:** detect spikes, dips, changes, periodic behavior, and timing relationships among metrics. Analysis covers all curves by default, with optional inclusion/exclusion patterns. Period-aware scoring separates routine fluctuations from unusual events.
+- **Configurations:** compare typed values against a baseline, exclude irrelevant fields, and highlight differences or scalar extrema. Include scalar summaries at the latest or a fixed step, with optional smoothing. Customize field names and displayed values while retaining the original data for comparisons and exports.
+- **Relationships:** explore associations between configuration choices and outcomes using ranked scores, scatter plots, and parallel coordinates. Outcomes can inherit a configured scalar's settings. Missing and null conditions share a category by default, and numeric conditions can be treated as categories.
+- **Time series:** detect spikes, sustained changes, periodic behavior, and timing relationships across curves. Rank related curves by correlation or onset to investigate which changes appear first. Analysis covers all curves by default, with optional inclusion/exclusion patterns.
 - **Named views:** save settings across workspace pages, with either a fixed experiment set or selection that follows filters and includes new matches. Working changes autosave; saved snapshots change only through an explicit update.
 - **TensorBoard:** use the native dashboards for logged media, distributions, model graphs, embeddings, and other supported plugins alongside Expman's comparisons and analyses.
 
@@ -67,6 +67,8 @@ Group means interpolate within recorded ranges. Overlap uses the common range; u
 ### Analysis scores and timing
 
 Continuous event detection uses local median/MAD scores; binary flags use a smoothed Bernoulli model with a longer context. Periodic adjustment accounts for expected cycle fluctuations. Detection scores are distinct from the displayed curve's z-score.
+
+Sustained-change analysis measures departures from a preceding baseline and reports Pearson correlations of smoothed levels and adjacent changes. Onset delay compares sustained threshold crossings. Correlation lag measures alignment across the interval.
 
 Positive event delay means the target follows the reference. Numeric associations use absolute Spearman correlation; categorical associations use square-root eta squared. These associations and timing relationships do not establish causation.
 

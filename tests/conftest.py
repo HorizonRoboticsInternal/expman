@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 from pathlib import Path
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -57,6 +58,32 @@ def client_factory():
 @pytest.fixture(autouse=True)
 def isolate_user_data(tmp_path, monkeypatch):
     monkeypatch.setenv("EXPMAN_HOME", str(tmp_path / "user-data"))
+
+
+@pytest.fixture
+def onset_signals():
+    positions = np.arange(1001, dtype=float)
+    generator = np.random.default_rng(12)
+    values = {}
+    for tag, shift, sign in [
+        ("reference", 0, 1),
+        ("early", -40, 1),
+        ("late", 40, 1),
+        ("inverse", -40, -1),
+    ]:
+        values[tag] = sign * np.exp(
+            -0.5 * ((positions - 750 - shift) / 70) ** 2
+        ) + generator.normal(0, 0.002, len(positions))
+    values["identical"] = 2 * values["reference"] + 1
+    values["constant"] = np.full(len(positions), 0.1)
+    values["drift"] = positions * 0.001
+    values["binary"] = (positions >= 600).astype(float)
+    values["isolated"] = np.zeros(len(positions))
+    values["isolated"][600] = 1
+    return {
+        f"onset/{tag}": np.column_stack((positions, signal, 1_790_000_000 + positions * 2))
+        for tag, signal in values.items()
+    }
 
 
 @pytest.fixture

@@ -5,7 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 const context = {window: {}};
-for (const filename of ["appearance.js", "signals.js", "filters.js", "configurations.js"]) {
+for (const filename of ["appearance.js", "signals.js", "filters.js", "configurations.js", "onsets.js", "views.js"]) {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../src/expman/static", filename), "utf8"), context);
 }
 const appearance = context.window.ExpmanAppearance;
@@ -113,3 +113,41 @@ const reversed = configRows.selectedComparison(projected, ["b", "a"]);
 assert.deepEqual(Array.from(reversed.rows[0].cells).map(cell => cell.value), [2, 1]);
 const baselineWidth = configRows.automaticWidths([], [{id: "a", name: "Short"}, {id: "b", name: "B".repeat(120)}], valueText, value => value.length, 1, "b");
 assert.equal(baselineWidth["experiment-name"], 147);
+
+const display = configRows.displayPreferences({kind: {name: "  Model kind  ", values: [
+  {value: 1, text: "number"}, {value: "1", text: "string"}, {value: true, text: "enabled"},
+  {value: null, text: ""}, {value: [1, {b: 2, a: false}], text: "array"},
+  {value: {b: 2, a: 1}, text: "object"}, {value: {a: 1, b: 2}, text: "duplicate"},
+  {value: Infinity, text: "invalid"}, {text: "missing value"}, {value: "invalid", text: 123}
+]}, empty: {name: "", values: []}, malformed: null});
+assert.deepEqual(Object.keys(display), ["kind"]);
+assert.equal(display.kind.name, "Model kind");
+assert.equal(display.kind.values.length, 6);
+const mapped = value => configRows.displayValue(value, display.kind, value => JSON.stringify(value));
+assert.equal(mapped(1), "number");
+assert.equal(mapped("1"), "string");
+assert.equal(mapped(true), "enabled");
+assert.equal(mapped(false), "false");
+assert.equal(mapped(null), "");
+assert.equal(mapped([1, {a: false, b: 2}]), "array");
+assert.equal(mapped({a: 1, b: 2}), "object");
+assert.equal(mapped({a: 2, b: 1}), '{"a":2,"b":1}');
+assert.equal(configRows.displayValue(1, null, String), "1");
+assert.throws(() => configRows.valueKey(NaN), /finite/);
+const reserved = configRows.displayPreferences(JSON.parse('{"__proto__":{"name":"Prototype","values":[]},"toString":{"name":"Text","values":[]}}'));
+assert(Object.prototype.hasOwnProperty.call(reserved, "__proto__"));
+assert.equal(reserved.toString.name, "Text");
+assert.equal(context.window.ExpmanViews.signature({configDisplay: {}}), context.window.ExpmanViews.signature({}));
+assert.notEqual(context.window.ExpmanViews.signature({configDisplay: display}), context.window.ExpmanViews.signature({}));
+
+const onsets = context.window.ExpmanOnsets;
+const onsetData = {rows: [{tag: "early", correlation: .8, onset: 10, related: true}, {tag: "inverse", correlation: -.95, onset: 20, related: true}, {tag: "missing", correlation: null, onset: null, related: false}]};
+assert.deepEqual(Array.from(onsets.rows(onsetData, onsets.defaults)).map(row => row.tag), ["inverse", "early"]);
+assert.deepEqual(Array.from(onsets.rows(onsetData, {...onsets.defaults, onset_sort: "onset", onset_show_all: true})).map(row => row.tag), ["early", "inverse", "missing"]);
+assert.equal(onsets.preferences({onset_duration: -1, onset_threshold: Infinity}).onset_duration, 50);
+assert.equal(onsets.preferences({onset_min_correlation: 2}).onset_min_correlation, .7);
+assert.equal(context.window.ExpmanViews.signature({time: {mode: "events", ...onsets.defaults}}), context.window.ExpmanViews.signature({time: {mode: "events"}}));
+assert.notEqual(context.window.ExpmanViews.signature({time: {mode: "events", ...onsets.defaults, onset_sort: "onset"}}), context.window.ExpmanViews.signature({time: {mode: "events"}}));
+const normalized = onsets.normalized({x: [0, 1, 9, 10], y: [0, 1, 1, 2], raw: [0, 1, 1, 2], baseline: [0, 0, 0, 0], segments: [1, 1, 3, 3]}, 0, 10);
+assert.deepEqual(Array.from(normalized.y), [0, .5, null, .5, 1]);
+assert.equal(normalized.customdata.length, normalized.x.length);

@@ -2,6 +2,7 @@ import threading
 import time
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from expman.jobs import AnalysisJobs
@@ -30,6 +31,8 @@ def test_relationship_grouping_options_and_cached_outcomes(client, monkeypatch):
         item.config["numeric_condition"] = [1, 1.0, 2, 2.0, 3, 3][index]
         if index < 5:
             item.config["nullable_condition"] = [1, 1.0, 2, 2.0, None][index]
+        if index < 3:
+            item.config["sparse_flag"] = True
     request = {
         "experiment_ids": [item.id for item in selected],
         "metric": "eval/reward",
@@ -51,8 +54,21 @@ def test_relationship_grouping_options_and_cached_outcomes(client, monkeypatch):
     default = next(
         item for item in automatic["associations"] if item["key"] == "nullable_condition"
     )
-    assert default["count"] == 5
-    assert any(group["value"] == "null" for group in default["groups"])
+    assert default["count"] == 6
+    assert next(group for group in default["groups"] if group.get("missing"))["count"] == 2
+    sparse = next(item for item in automatic["associations"] if item["key"] == "sparse_flag")
+    assert [group["count"] for group in sparse["groups"]] == [3, 3]
+    excluded_request = {
+        **request,
+        "excluded_missing_conditions": ["nullable_condition", "sparse_flag"],
+    }
+    excluded = client.post("/api/analysis", json=excluded_request).json()
+    observed = next(
+        item for item in excluded["associations"] if item["key"] == "nullable_condition"
+    )
+    assert observed["count"] == 5
+    assert any(group["value"] == "null" for group in observed["groups"])
+    assert all(item["key"] != "sparse_flag" for item in excluded["associations"])
     merged_request = {
         **request,
         "categorical_conditions": ["numeric_condition"],
@@ -90,10 +106,10 @@ def test_relationship_grouping_options_and_cached_outcomes(client, monkeypatch):
     first = client.post("/api/relationships/jobs", json=request).json()
     assert wait_for_job(client, first["id"], "/api/relationships/jobs")["status"] == "complete"
     assert client.post("/api/relationships/jobs", json=request).json()["id"] == first["id"]
-    changed = client.post("/api/relationships/jobs", json=merged_request).json()
+    changed = client.post("/api/relationships/jobs", json=excluded_request).json()
     assert changed["id"] != first["id"]
     assert wait_for_job(client, changed["id"], "/api/relationships/jobs")["status"] == "complete"
-    assert client.get(f"/api/relationships/jobs/{changed['id']}/result").json() == merged
+    assert client.get(f"/api/relationships/jobs/{changed['id']}/result").json() == excluded
 
 
 def test_missing_category_does_not_merge_literal_strings(client):
@@ -207,6 +223,33 @@ def test_binary_context_request_validation_and_result_metadata(client):
     for invalid in [0, 30, 100002, 1000.5]:
         response = client.post("/api/analysis/jobs", json={**request, "binary_window": invalid})
         assert response.status_code == 422
+
+
+@pytest.mark.parametrize("detector", ["spike", "change"])
+def test_period_aware_jobs_complete_for_gapped_curves(client, monkeypatch, detector):
+    experiment = client.get("/api/experiments").json()["experiments"][0]["id"]
+    positions = np.concatenate((np.arange(100), np.arange(1000, 2000))).astype(float)
+    values = 2 + 5 * (positions % 10 == 0).astype(float)
+    values[50] += 1e8
+    monkeypatch.setattr(
+        client.app.state.repository,
+        "load",
+        lambda _: {"gapped": np.column_stack((positions, values, positions))},
+    )
+    started = client.post(
+        "/api/analysis/jobs",
+        json={"experiment_id": experiment, "detector": detector, "window": 101, "threshold": 20},
+    )
+    assert started.status_code == 202
+    identifier = started.json()["id"]
+    status = wait_for_job(client, identifier)
+    assert status["status"] == "complete", status
+    assert status["percent"] == 100
+    result = client.get(f"/api/analysis/jobs/{identifier}/result").json()
+    assert result["curves"]["gapped"]["source_points"] == len(positions)
+    assert result["curves"]["gapped"]["x"] == positions.tolist()
+    assert result["detections"]["gapped"]["periodic"]["period"] == 10
+    assert any(event["x"] == 50 for event in result["timeline"])
 
 
 def test_period_aware_scoring_defaults_and_cache_identity(client):

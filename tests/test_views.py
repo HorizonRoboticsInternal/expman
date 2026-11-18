@@ -11,6 +11,12 @@ def test_named_views_preserve_snapshots_and_restore_all_page_settings(client, cl
         "selectionMode": "manual",
         "options": {"smoothing": 0.8},
         "configScalars": [{"id": "reward", "tag": "reward"}],
+        "configDisplay": {
+            "model.kind": {
+                "name": "Architecture",
+                "values": [{"value": "transformer", "text": "Transformer"}],
+            }
+        },
         "configurationExclusions": {"patterns": ["seed"], "files": ["hparams.yml"]},
         "time": {"threshold": 20},
         "combinedPlot": {"tags": ["a", "b"]},

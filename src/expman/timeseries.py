@@ -155,11 +155,11 @@ def repeating_cycle(positions, residual, values, binary):
     segment = int(np.argmax(np.diff(boundaries)))
     start, end = boundaries[segment : segment + 2]
     start = max(start, end - 16384)
-    times, values = positions[start:end], residual[start:end]
+    times, segment_residual = positions[start:end], residual[start:end]
     if len(times) < 60 or np.mean(np.abs(np.diff(times) - interval) <= interval * 0.05) < 0.98:
         return None
-    lower, upper = np.quantile(values, [0.01, 0.99])
-    clipped = np.clip(values, lower, upper)
+    lower, upper = np.quantile(segment_residual, [0.01, 0.99])
+    clipped = np.clip(segment_residual, lower, upper)
     clipped -= clipped.mean()
     if np.sum(clipped**2) <= 1e-24:
         return None

@@ -19,9 +19,38 @@ from expman.demo import generate_demo
 STRESS_POINTS = 20_050
 
 
-def build_ui_app(root, scenario="basic"):
+def build_ui_app(root, scenario="basic", onset_signals=None):
     logdir = root / "logs"
     generate_demo(logdir, count=4)
+    if scenario == "missing-condition":
+        for run, value in [("exp000", True), ("exp001", None)]:
+            path = logdir / run / "config.yaml"
+            config = yaml.safe_load(path.read_text())
+            config["motion"] = {"reserve_endpoint_frame": value}
+            path.write_text(yaml.safe_dump(config))
+    if scenario == "onsets":
+        observations = {}
+        for tag, points in onset_signals.items():
+            for step, value, wall_time in points:
+                observations.setdefault(int(step), [wall_time, []])[1].append(
+                    summary_pb2.Summary.Value(tag=tag, simple_value=float(value))
+                )
+        writer = EventFileWriter(str(logdir / "exp000"))
+        try:
+            for step, (wall_time, values) in sorted(observations.items()):
+                values.extend(
+                    summary_pb2.Summary.Value(
+                        tag=f"onset/other_{index:02}", simple_value=step * (index + 1) * 0.001
+                    )
+                    for index in range(12)
+                )
+                writer.add_event(
+                    event_pb2.Event(
+                        step=step, wall_time=wall_time, summary=summary_pb2.Summary(value=values)
+                    )
+                )
+        finally:
+            writer.close()
     if scenario == "refresh":
         for index in range(9):
             (logdir / f"broken-{index}").symlink_to(root / f"missing-{index}")
@@ -29,10 +58,17 @@ def build_ui_app(root, scenario="basic"):
         for path in (logdir / "exp000").glob("events.out.tfevents.*"):
             path.unlink()
         EventFileWriter(str(logdir / "exp000")).close()
-    if scenario in {"annotations", "json-refresh"}:
+    if scenario in {"annotations", "json-refresh", "config-display"}:
         (logdir / "exp000" / "evaluation_metrics.json").write_text(
             json.dumps({"metrics": {"score": 0.95}})
         )
+    if scenario == "config-display":
+        for index in range(4):
+            path = logdir / f"exp{index:03}" / "config.yaml"
+            config = yaml.safe_load(path.read_text())
+            if index < 3:
+                config["display"] = {"value": [1, "1", None][index]}
+            path.write_text(yaml.safe_dump(config))
     if scenario == "config-search":
         for index in range(4):
             path = logdir / f"exp{index:03}" / "config.yaml"
@@ -80,6 +116,7 @@ def build_ui_app(root, scenario="basic"):
         gate = threading.Event()
         app.state.ui_metadata_gate = gate
         app.state.metadata_jobs.executor.submit(gate.wait, 30)
+    if scenario in {"combined-indexing", "plot-refresh"}:
         start_fast = app.state.tensorboard._start_fast
 
         def start_with_short_reload(board):
@@ -115,7 +152,19 @@ def build_ui_app(root, scenario="basic"):
         }
     if scenario == "refresh":
         view["selectionMode"] = "filters"
-    if scenario == "json-refresh":
+    if scenario == "onsets":
+        view["time"] = {
+            "mode": "onsets",
+            "experiment": identifiers[0],
+            "reference": "",
+            "include": ["onset/*"],
+            "exclude": [],
+            "start": 400,
+            "end": 1000,
+            "onset_smoothing": 10,
+            "onset_duration": 20,
+        }
+    if scenario in {"json-refresh", "config-display"}:
         view["configScalars"] = [
             {"id": "evaluation-score", "tag": "JSON/evaluation_metrics/score", "mode": "latest"}
         ]
@@ -155,7 +204,9 @@ def browser_type_launch_args(browser_type_launch_args, browser_name):
 @pytest.fixture
 def ui_server(tmp_path, request):
     scenario = request.node.get_closest_marker("ui_scenario")
-    app = build_ui_app(tmp_path, scenario.args[0] if scenario else "basic")
+    name = scenario.args[0] if scenario else "basic"
+    signals = request.getfixturevalue("onset_signals") if name == "onsets" else None
+    app = build_ui_app(tmp_path, name, signals)
     request.node.expman_ui_app = app
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))

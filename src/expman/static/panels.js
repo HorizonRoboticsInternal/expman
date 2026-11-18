@@ -7,6 +7,10 @@ const overviewPalette = [
   "#007f5f", "#9d4e00", "#005f73", "#8f2d56", "#4f5d2f", "#3f607c", "#a60a9a", "#997100"
 ];
 const overviewMemberCache = new WeakMap();
+const matchPanelTags = (tags, query) => {
+  const search = query.trim().toLowerCase();
+  return tags.filter(tag => tag.toLowerCase().includes(search));
+};
 
 window.ExpmanPanels = {
   traceUid(identifier, role) {
@@ -172,9 +176,10 @@ window.ExpmanPanels = {
     const range = [lower - padding, upper + padding];
     return range.every(Number.isFinite) ? range : [lower, upper];
   },
+  matching: matchPanelTags,
   tree(tags, query = "", collapsed = []) {
     const root = {prefix: "", tags: [], groups: [], count: 0}, closed = new Set(collapsed);
-    const matching = tags.filter(tag => tag.toLowerCase().includes(query.trim().toLowerCase()));
+    const matching = matchPanelTags(tags, query);
     for (const tag of matching.slice().sort()) {
       const parts = tag.split("/"), prefixes = parts.slice(0, -1);
       let node = root;
@@ -202,7 +207,7 @@ window.ExpmanPanels = {
   },
   page(tags, query = "", page = 0, pageSize = 16) {
     const size = Number.isFinite(Number(pageSize)) ? Math.max(1, Math.min(32, Math.floor(Number(pageSize)))) : 16;
-    const filtered = tags.filter(tag => tag.toLowerCase().includes(query.trim().toLowerCase()));
+    const filtered = matchPanelTags(tags, query);
     const pages = Math.max(1, Math.ceil(filtered.length / size));
     const requested = Number.isFinite(Number(page)) ? Math.floor(Number(page)) : 0;
     const current = Math.max(0, Math.min(requested, pages - 1));

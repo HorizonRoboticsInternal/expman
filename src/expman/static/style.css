@@ -202,6 +202,32 @@ tbody tr.ignored { opacity: .55; background: var(--soft-surface); }
 .config-table thead th:not(:first-child) { white-space: normal; overflow-wrap: anywhere; }
 .config-field-heading { display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-width: 0; }
 .config-field-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+.config-text-rule { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 28px; align-items: end; gap: 8px; margin-bottom: 10px; }
+.config-text-rule .field { min-width: 0; margin: 0; }
+.config-text-rule input { width: 100%; min-width: 0; }
+.config-text-rule > .icon-button { align-self: center; margin-top: 18px; }
+.onset-options { flex-basis: 100%; font-size: calc(12px * var(--font-scale)); }
+.onset-options > summary { cursor: pointer; margin: 4px 0; }
+.onset-options p { max-width: 1000px; }
+.time-reference-field { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-width: 100%; }
+.time-reference-picker { position: relative; width: 240px; max-width: 100%; }
+.time-reference-picker input { width: 100%; padding: 6px 28px 6px 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--ink); background: var(--paper); font-size: calc(10px * var(--font-scale)); }
+.time-reference-picker input::placeholder { color: var(--ink); opacity: 1; }
+.time-reference-toggle { position: absolute; right: 1px; top: 1px; bottom: 1px; width: 26px; border: 0; border-radius: 4px; color: var(--ink); background: var(--paper); }
+.time-reference-menu { position: absolute; z-index: 20; border: 1px solid var(--line); border-radius: 5px; background: var(--paper); color: var(--ink); box-shadow: 0 4px 14px #0002; font-size: calc(11px * var(--font-scale)); }
+#time-reference-list { overflow-y: auto; overscroll-behavior: contain; padding: 4px; }
+#time-reference-list [role="option"] { padding: 5px 8px; border-radius: 3px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#time-reference-list [role="option"]:hover, #time-reference-list .active { background: var(--accent-soft); }
+#time-reference-list [aria-selected="true"] { font-weight: 650; }
+#time-reference-count { border-top: 1px solid var(--line); padding: 5px 8px; }
+.search-dropdown { position: fixed; inset: auto; z-index: 21; margin: 0; padding: 5px; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 5px; background: var(--paper); color: var(--ink); box-shadow: 0 4px 14px #0002; font-size: calc(11px * var(--font-scale)); }
+.search-dropdown-input { width: 100%; flex-shrink: 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--ink); }
+#search-dropdown-choices { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+#search-dropdown-choices [role="option"], .search-dropdown-empty { padding: 5px 8px; border-radius: 3px; overflow-wrap: anywhere; }
+#search-dropdown-choices [role="option"] { cursor: pointer; }
+#search-dropdown-choices [role="option"]:hover, #search-dropdown-choices .active { background: var(--accent-soft); }
+#search-dropdown-choices [aria-selected="true"] { font-weight: 650; }
+#search-dropdown-choices [aria-disabled="true"] { opacity: .5; cursor: default; }
 .config-display-controls { display: inline-flex; align-items: center; gap: 6px; font-size: calc(9px * var(--font-scale)); }
 .config-experiment-label { display: flex; align-items: center; gap: 4px; }
 .config-experiment-name { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -315,6 +341,7 @@ progress { display: block; width: 100%; height: 7px; margin-top: 10px; accent-co
 .overview-panel .card-actions progress { width: 28px; height: 4px; margin: 0; }
 .overview-panel .panel-expand-button { width: 24px; height: 24px; padding: 1px 4px; font-size: calc(16px * var(--font-scale)); line-height: 1; }
 .overview-panel .card-actions > .icon-button { width: 20px; padding: 1px 0; font-size: calc(14px * var(--font-scale)); }
+.button.plot-refresh-button { width: 24px; padding: 1px 0; font-size: calc(14px * var(--font-scale)); line-height: 1.4; }
 .panel-log-toggle { display: inline-flex; flex-shrink: 0; align-items: center; gap: 3px; white-space: nowrap; font-size: calc(10px * var(--font-scale)); cursor: pointer; }
 .panel-log-toggle input { margin: 0; }
 @container (max-width: 380px) {

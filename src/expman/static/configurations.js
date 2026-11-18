@@ -1,5 +1,7 @@
 "use strict";
 
+const configValueLabelCache = new WeakMap();
+
 window.ExpmanConfigurations = {
   preferences(view = {}) {
     const seen = new Set();
@@ -12,8 +14,41 @@ window.ExpmanConfigurations = {
     const widths = view.configColumnWidths && typeof view.configColumnWidths === "object" && !Array.isArray(view.configColumnWidths) ? view.configColumnWidths : {};
     return {configScalars: scalars, configOrder: Array.from(new Set((Array.isArray(view.configOrder) ? view.configOrder : []).filter(key => typeof key === "string"))),
       configFullNames: view.configFullNames === true,
+      configDisplay: this.displayPreferences(view.configDisplay),
       configColumnWidths: Object.fromEntries(Object.entries(widths).filter(([key, width]) => /^(experiment-name|config:.+|scalar:[A-Za-z0-9_-]{1,64})$/.test(key) && Number.isFinite(width))
         .map(([key, width]) => [key, this.columnWidth(key, width)]))};
+  },
+  valueKey(value) {
+    return JSON.stringify(value, (key, item) => {
+      if (typeof item === "number" && !Number.isFinite(item)) throw new Error("Mapping values must contain finite numbers");
+      return item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([first], [second]) => first.localeCompare(second))) : item;
+    });
+  },
+  displayPreferences(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(Object.entries(value).slice(0, 2000).flatMap(([key, entry]) => {
+      if (!key || key.length > 4000 || !entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+      const name = typeof entry.name === "string" ? entry.name.trim().slice(0, 4000) : "", seen = new Set(), values = [];
+      for (const rule of (Array.isArray(entry.values) ? entry.values : []).slice(0, 1000)) {
+        if (!rule || typeof rule.text !== "string" || rule.text.length > 4000 || !Object.prototype.hasOwnProperty.call(rule, "value")) continue;
+        try {
+          const identity = this.valueKey(rule.value);
+          if (!identity || identity.length > 80000 || seen.has(identity)) continue;
+          seen.add(identity); values.push({value: JSON.parse(identity), text: rule.text});
+        } catch (error) { continue; }
+      }
+      return name || values.length ? [[key, {name, values}]] : [];
+    }));
+  },
+  displayValue(value, entry, fallback) {
+    if (!entry || !Array.isArray(entry.values) || !entry.values.length) return fallback(value);
+    let labels = configValueLabelCache.get(entry);
+    if (!labels) {
+      labels = new Map(entry.values.map(rule => [this.valueKey(rule.value), rule.text]));
+      configValueLabelCache.set(entry, labels);
+    }
+    const key = this.valueKey(value);
+    return labels.has(key) ? labels.get(key) : fallback(value);
   },
   columnWidth(key, width) { return Math.round(Math.max(key === "experiment-name" ? 120 : 44, Math.min(2000, width))); },
   automaticWidths(fields, experiments, renderValue, measure = value => Array.from(value).length * 6, scale = 1, baseline = "") {

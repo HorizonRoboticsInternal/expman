@@ -13,6 +13,7 @@ from expman.analytics import analyze, curve_payload
 from expman.config_scalars import scalar_comparison_rows
 from expman.fast_reader import FullScalarReader
 from expman.json_metrics import SummaryScalars
+from expman.onsets import sustained_change_analysis
 from expman.tensorboard_data import TensorBoardScalars, fast_metadata
 from expman.timeseries import event_analysis, periodicity_analysis
 
@@ -183,7 +184,11 @@ class AnalysisJobs:
                         metadata[item.id] = self.repository.load_metadata(item)
                 result = {"experiment_ids": options["experiment_ids"], "metadata": metadata}
             else:
-                analyze = event_analysis if job["kind"] == "events" else periodicity_analysis
+                analyze = {
+                    "events": event_analysis,
+                    "periodicity": periodicity_analysis,
+                    "onsets": sustained_change_analysis,
+                }[job["kind"]]
                 result = analyze(
                     self.repository, experiment, options.get("tags"), options, progress
                 )
@@ -263,8 +268,9 @@ class AnalysisJobs:
             condition_keys=options["condition_keys"],
             smoothing=settings["smoothing"],
             categorical_conditions=settings.get("categorical_conditions", []),
-            missing_conditions=settings.get("missing_conditions", []),
+            missing_conditions=settings.get("missing_conditions"),
             separate_null_conditions=settings.get("separate_null_conditions", []),
+            excluded_missing_conditions=settings.get("excluded_missing_conditions", []),
         )
         result["condition_scope"] = settings["condition_scope"]
         for record in result["records"]:

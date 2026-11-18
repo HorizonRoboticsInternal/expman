@@ -250,6 +250,28 @@ def test_periodic_neighbors_do_not_cross_a_logging_gap():
     assert scale.tolist() == [0, 0]
 
 
+@pytest.mark.parametrize("layout", ["leading_gap", "trailing_gap", "long_curve"])
+@pytest.mark.parametrize("detector", ["spike", "change"])
+def test_periodic_discovery_keeps_full_signals_when_using_a_subsegment(layout, detector):
+    positions = (
+        np.concatenate((np.arange(100), np.arange(1000, 2000)))
+        if layout == "leading_gap"
+        else np.concatenate((np.arange(1000), np.arange(2000, 2100)))
+        if layout == "trailing_gap"
+        else np.arange(16_480)
+    ).astype(float)
+    values = 2 + 5 * (positions % 10 == 0).astype(float)
+    values[[50, -50]] += 1e8
+    original = values.copy()
+    result = detect_events(positions, values, window=101, threshold=20, detector=detector)
+    assert result["periodic"]["period"] == 10
+    assert result["periodic"]["source_points"] == len(positions) - (detector == "change")
+    assert result["periodic"]["adjusted_points"] > len(positions) * 0.8
+    assert {positions[50], positions[-50]} <= {event["x"] for event in result["events"]}
+    assert len(result["events"]) <= 6
+    np.testing.assert_array_equal(values, original)
+
+
 def test_unreliable_periods_preserve_local_event_scoring():
     generator = np.random.default_rng(124)
     positions = np.cumsum(generator.uniform(0.3, 1.7, 500))

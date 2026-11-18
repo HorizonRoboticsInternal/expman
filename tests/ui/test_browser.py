@@ -131,6 +131,30 @@ def test_repeated_expand_close_and_regroup_with_real_plotly(ui_page):
         assert page.locator("#overview-legend-home #overview-legend").count() == 1
 
 
+def test_curve_hover_spacing_matches_in_expanded_plot(ui_page):
+    page = ui_page
+
+    def row_pitch(selector):
+        graph = page.locator(selector)
+        graph.scroll_into_view_if_needed()
+        point = graph.evaluate("""plot => {
+          const {xaxis, yaxis} = plot._fullLayout;
+          return {x: xaxis.l2p(150) + xaxis._offset, y: yaxis._length / 2 + yaxis._offset};
+        }""")
+        box = graph.bounding_box()
+        page.mouse.move(box["x"] + point["x"], box["y"] + point["y"])
+        rows = graph.locator(".hoverlayer g.legend g.traces")
+        expect(rows).to_have_count(4)
+        positions = rows.evaluate_all("rows => rows.map(row => row.getBoundingClientRect().top)")
+        return (positions[-1] - positions[0]) / (len(positions) - 1)
+
+    inline_pitch = row_pitch("#curve-0")
+    assert 10 <= inline_pitch <= 18
+    page.get_by_role("button", name="Expand panel train/loss", exact=True).click()
+    wait_for_plot(page, "#expanded-panel-plot")
+    assert row_pitch("#expanded-panel-plot") == pytest.approx(inline_pitch, abs=1)
+
+
 def test_independent_and_global_smoothing_reuses_observations(ui_page):
     page = ui_page
     calls = []
@@ -216,9 +240,35 @@ def test_shared_legend_isolation_colors_and_persistence(ui_page):
               input.dispatchEvent(new Event('change', {bubbles: true}));
             }"""
         )
+    with page.expect_response(
+        lambda response: saved_view(
+            response, lambda view: identifier in view["hiddenOverviewCurves"]
+        )
+    ):
+        button.click()
+    requests = []
+    page.on(
+        "request",
+        lambda request: (
+            requests.append(request.post_data_json)
+            if urlsplit(request.url).path == "/api/curves"
+            else None
+        ),
+    )
     page.reload()
     wait_for_overview(page)
     expect(page.locator(f'[data-overview-color="{identifier}"]')).to_have_value("#123456")
+    expect(button).to_have_attribute("aria-pressed", "false")
+    assert requests and all(identifier not in request["experiment_ids"] for request in requests)
+    assert all(item["id"] != identifier for item in main_traces(page))
+    requests.clear()
+    with page.expect_response("**/api/curves"):
+        button.click()
+    page.wait_for_function(
+        "id => document.getElementById('curve-0').data.some(trace => trace.legendgroup === id)",
+        arg=identifier,
+    )
+    assert requests and all(request["experiment_ids"] == [identifier] for request in requests)
     assert (
         next(item for item in main_traces(page) if item["id"] == identifier)["color"] == "#123456"
     )
@@ -229,6 +279,139 @@ def test_shared_legend_isolation_colors_and_persistence(ui_page):
     expect(page.locator(f'.run-name[data-value="{identifier}"] .color-dot')).to_have_css(
         "background-color", "rgb(18, 52, 86)"
     )
+
+
+@pytest.mark.ui_scenario("plot-refresh")
+def test_refresh_updates_only_visible_curves_in_one_panel(ui_page, tmp_path):
+    page = ui_page
+    panel = page.locator("#curve-0")
+    legend = page.locator('#overview-legend [data-action="toggle-overview-curve"]')
+    visible = legend.first.get_attribute("data-value")
+    hidden = legend.nth(1).get_attribute("data-value")
+    legend.first.dblclick()
+    expect(legend.nth(1)).to_have_attribute("aria-pressed", "false")
+    refresh = page.get_by_role("button", name="Refresh visible curves for train/loss")
+    expect(refresh).to_be_enabled()
+    panel.evaluate("""plot => {
+      window.__otherPanelData = document.getElementById('curve-1').data;
+      return Plotly.relayout(plot, {'xaxis.range': [100, 160], 'xaxis.autorange': false});
+    }""")
+
+    def append_point(step):
+        writer = EventFileWriter(str(tmp_path / "logs" / "exp000"))
+        try:
+            writer.add_event(
+                event_pb2.Event(
+                    step=step,
+                    wall_time=1_790_004_000 + step,
+                    summary=summary_pb2.Summary(
+                        value=[summary_pb2.Summary.Value(tag="train/loss", simple_value=0.125)]
+                    ),
+                )
+            )
+        finally:
+            writer.close()
+
+    append_point(400)
+    endpoint = page.url.rstrip("/") + "/api/curves"
+    deadline = time.monotonic() + 20
+    while True:
+        response = page.request.post(
+            endpoint,
+            data={"experiment_ids": [visible], "tags": ["train/loss"], "source": "tensorboard"},
+        )
+        curves = response.json()["curves"]["train/loss"]
+        if curves and curves[0]["x"][-1] == 400:
+            break
+        assert time.monotonic() < deadline
+        page.wait_for_timeout(200)
+    hidden_before = next(trace for trace in main_traces(page) if trace["id"] == hidden)
+    calls = []
+    page.on("request", lambda request: calls.append(urlsplit(request.url).path))
+    with page.expect_response("**/api/curves") as sampled:
+        refresh.click()
+    assert sampled.value.request.post_data_json["experiment_ids"] == [visible]
+    assert sampled.value.request.post_data_json["tags"] == ["train/loss"]
+    expect(refresh).to_be_enabled()
+    traces = {trace["id"]: trace for trace in main_traces(page)}
+    assert traces[visible]["x"][-1] == 400 and traces[visible]["original"][-1] == 0.125
+    assert traces[hidden] == hidden_before
+    assert panel.evaluate("plot => plot._fullLayout.xaxis.range") == [100, 160]
+    assert page.locator("#curve-1").evaluate("plot => plot.data === window.__otherPanelData")
+    assert [path for path in calls if path.startswith(("/api/curves", "/api/refresh"))] == [
+        "/api/curves"
+    ]
+
+    with page.expect_response("**/api/curves/all/jobs") as full:
+        page.locator('[data-full-panel="train/loss"] button').click()
+    assert full.value.request.post_data_json["experiment_ids"] == [visible]
+    expect(page.locator('[data-full-panel="train/loss"]')).to_have_text(
+        "All values loaded", timeout=60_000
+    )
+    page.get_by_role("button", name="Expand panel train/loss", exact=True).click()
+    dialog = page.locator("#panel-dialog")
+    append_point(401)
+    with page.expect_response("**/api/curves/all/jobs") as complete:
+        dialog.get_by_role("button", name="Refresh visible curves for train/loss").click()
+    assert complete.value.request.post_data_json["experiment_ids"] == [visible]
+    expect(
+        dialog.get_by_role("button", name="Refresh visible curves for train/loss")
+    ).to_be_enabled(timeout=60_000)
+    expect(dialog.locator('[data-full-panel="train/loss"]')).to_have_text("All values loaded")
+    for selector in ("#curve-0", "#expanded-panel-plot"):
+        traces = {trace["id"]: trace for trace in main_traces(page, selector)}
+        assert traces[visible]["x"][-1] == 401 and traces[visible]["simplify"] is False
+        assert hidden not in traces
+    dialog.get_by_role("button", name="Close", exact=True).click()
+    legend.first.click()
+    expect(refresh).to_be_disabled()
+    with page.expect_response("**/api/curves/all/jobs") as revealed:
+        page.get_by_role("button", name="Show all curves", exact=True).click()
+    assert set(revealed.value.request.post_data_json["experiment_ids"]) == {
+        button.get_attribute("data-value") for button in legend.all()
+    } - {visible}
+    expect(page.locator('[data-full-panel="train/loss"]')).to_have_text(
+        "All values loaded", timeout=60_000
+    )
+    expect(refresh).to_be_enabled()
+    assert {trace["id"] for trace in main_traces(page)} == {
+        button.get_attribute("data-value") for button in legend.all()
+    }
+    page.locator("#group-mode").select_option("saved")
+    wait_for_plot(page, "#curve-0")
+    legend.filter(has_text="Other group").click()
+    expect(legend.filter(has_text="Other group")).to_have_attribute("aria-pressed", "false")
+    with page.expect_response("**/api/curves") as grouped:
+        refresh.click()
+    request = grouped.value.request.post_data_json
+    assert set(request["experiment_ids"]) == {visible, hidden}
+    assert request["group_ids"] == ["control"]
+    expect(refresh).to_be_enabled()
+    assert any(trace["id"] == "saved:other" for trace in main_traces(page))
+
+    page.locator("#group-mode").select_option("config")
+    fields = page.locator("#dialog")
+    fields.get_by_label("model.architecture", exact=True).check()
+    fields.get_by_role("button", name="Save", exact=True).click()
+    transformer = legend.filter(has_text="transformer")
+    with page.expect_response(
+        lambda response: saved_view(
+            response,
+            lambda view: any("transformer" in key for key in view["hiddenOverviewCurves"]),
+        )
+    ):
+        transformer.click()
+    calls.clear()
+    with page.expect_response("**/api/curves") as config_curves:
+        page.reload()
+    assert len(config_curves.value.request.post_data_json["experiment_ids"]) == 1
+    assert config_curves.value.request.post_data_json["group_by"] == ["model.architecture"]
+    wait_for_overview(page)
+    expect(transformer).to_have_attribute("aria-pressed", "false")
+    with page.expect_response("**/api/curves") as shown:
+        transformer.click()
+    assert {visible, hidden} <= set(shown.value.request.post_data_json["experiment_ids"])
+    assert len(shown.value.request.post_data_json["experiment_ids"]) == 3
 
 
 @pytest.mark.ui_scenario("annotations")
@@ -468,6 +651,47 @@ def test_expanded_sections_load_offscreen_plots_without_extra_clicks(ui_page):
     expect(last.locator('input[type="number"][data-panel-smoothing]')).to_have_value("0.6")
     last.locator(".chart").evaluate("plot => plot.dataset.uiLast = 'true'")
     wait_for_plot(page, '[data-ui-last="true"]')
+
+
+@pytest.mark.ui_scenario("sections")
+def test_metric_filter_shows_all_matching_plots_below_legend(ui_page):
+    page = ui_page
+    search = page.get_by_role("searchbox", name="Filter panels by metric tag")
+    controls = page.locator(".toolbar").filter(has=search)
+    chart_cards = page.locator("#overview-legend-home + #overview-panels .overview-panel")
+    section = page.locator('[data-panel-prefix="UI"] > .panel-group-heading')
+    expect(section).to_have_attribute("aria-expanded", "false")
+    assert search.evaluate(
+        "input => input.compareDocumentPosition(document.getElementById('overview-legend')) "
+        "& Node.DOCUMENT_POSITION_FOLLOWING"
+    )
+    search.fill("  Ui/PaNeL/  ")
+    expect(controls.get_by_role("status")).to_have_text("40 matching panels")
+    expect(search).to_be_focused()
+    expect(chart_cards).to_have_count(40)
+    expect(page.locator("#overview-panels .panel-group")).to_have_count(0)
+    expect(page.locator("#panels-per-page")).to_have_count(0)
+    last = chart_cards.filter(has=page.locator('.card-title[title="UI/panel/39"]'))
+    last.scroll_into_view_if_needed()
+    wait_for_plot(page, "#" + last.locator(".chart").get_attribute("id"))
+
+    search.fill("")
+    expect(section).to_have_attribute("aria-expanded", "false")
+    page.get_by_role("button", name="Choose panels", exact=True).click()
+    dialog = page.locator("#dialog")
+    dialog.get_by_label("train/loss", exact=True).uncheck()
+    dialog.get_by_role("button", name="Save", exact=True).click()
+    page.locator("#panels-per-page").select_option("8")
+    page.locator('[data-action="panels-next"]').click()
+    expect(controls.get_by_role("status")).to_contain_text("Showing 9–16")
+    search.fill("ui/panel/")
+    expect(chart_cards).to_have_count(40)
+    expect(page.locator('[data-action="panels-next"]')).to_have_count(0)
+    search.fill("no-such-metric")
+    expect(chart_cards).to_have_count(0)
+    expect(page.get_by_role("heading", name="No panels match this filter")).to_be_visible()
+    search.fill("")
+    expect(controls.get_by_role("status")).to_contain_text("Showing 9–16")
 
 
 @pytest.mark.ui_scenario("stress")
@@ -726,6 +950,24 @@ def test_combined_metrics_scaling_smoothing_and_persistence(ui_page):
             (0.9 * trace["original"][0] + trace["original"][1]) / 1.9
         )
     assert len(requests) == count, "Scaling and smoothing must reuse loaded observations"
+    graph = page.locator("#combined-chart")
+    graph.locator(".legend .traces").filter(has_text="eval/reward").click()
+    page.wait_for_function(
+        "document.getElementById('combined-chart').data.find(trace => "
+        "trace.meta.metric === 'eval/reward').visible === 'legendonly'"
+    )
+    combined_refresh = page.get_by_role("button", name="Refresh visible combined curves")
+    with page.expect_response("**/api/curves") as partial:
+        combined_refresh.click()
+    assert set(partial.value.request.post_data_json["tags"]) == set(tags) - {"eval/reward"}
+    assert partial.value.request.post_data_json["experiment_ids"] == [experiment]
+    expect(combined_refresh).to_be_enabled()
+    assert (
+        graph.evaluate(
+            "plot => plot.data.find(trace => trace.meta.metric === 'eval/reward').visible"
+        )
+        == "legendonly"
+    )
     change_number(page.locator("#smoothing-value"), 0.2)
     page.get_by_role("button", name="Apply to all panels", exact=True).click()
     expect(page.locator("#combined-smoothing")).to_have_value("0.2")
@@ -735,8 +977,22 @@ def test_combined_metrics_scaling_smoothing_and_persistence(ui_page):
         )
     ):
         page.locator("#combined-scale").select_option("standard")
+    legend = page.locator(
+        f'#overview-legend [data-action="toggle-overview-curve"][data-value="{experiment}"]'
+    )
+    with page.expect_response(
+        lambda response: saved_view(
+            response, lambda view: experiment in view["hiddenOverviewCurves"]
+        )
+    ):
+        legend.click()
+    expect(graph).not_to_be_visible()
+    requests.clear()
     page.reload()
     wait_for_overview(page)
+    expect(page.locator("#combined-status")).to_contain_text("Show this experiment")
+    assert requests and all(experiment not in request["experiment_ids"] for request in requests)
+    legend.click()
     wait_for_plot(page, "#combined-chart")
     expect(page.locator("#combined-scale")).to_have_value("standard")
     expect(page.locator("#combined-smoothing")).to_have_value("0.2")
@@ -1218,6 +1474,187 @@ def test_experiment_filters_apply_live_and_disclose_selection_outside_filters(ui
     expect(rows).to_have_count(4)
 
 
+def test_configuration_display_names_values_and_raw_semantics(ui_page, tmp_path):
+    page = ui_page
+    key = "model.architecture"
+    page.locator('#navigation [data-action="tab"][data-value="configs"]').click()
+    table = page.locator("#config-table")
+    header = table.locator(f'th[data-config-key="config:{key}"]')
+    cells = table.locator(f'td[data-config-field="config:{key}"]')
+    expect(cells.first).to_have_text("transformer")
+    expect(cells.last).to_have_text("moe")
+    reads = []
+    page.on(
+        "request",
+        lambda request: (
+            reads.append(request.url)
+            if urlsplit(request.url).path.startswith(
+                ("/api/compare", "/api/metrics", "/api/curves")
+            )
+            else None
+        ),
+    )
+    header.get_by_role("button", name=f"Customize text for {key}", exact=True).click()
+    dialog = page.locator("#dialog")
+    custom_name, custom_value = "Architecture <custom>", "Same <b>model</b>"
+    dialog.get_by_label("Column name", exact=True).fill(custom_name)
+    row = dialog.locator("[data-config-text-rule]").first
+    row.get_by_label("Original value", exact=True).fill("transformer")
+    row.get_by_label("Display text", exact=True).fill(custom_value)
+    dialog.get_by_role("button", name="+ Add value mapping", exact=True).click()
+    row = dialog.locator("[data-config-text-rule]").last
+    row.get_by_label("Original value", exact=True).fill("moe")
+    row.get_by_label("Display text", exact=True).fill(custom_value)
+    with page.expect_response(
+        lambda response: saved_view(
+            response,
+            lambda view: view.get("configDisplay", {}).get(key, {}).get("name") == custom_name,
+        )
+    ):
+        dialog.get_by_role("button", name="Save", exact=True).click()
+    expect(header.locator(".config-path-text")).to_have_text(custom_name)
+    expect(header.locator(".config-path-text")).to_have_attribute("title", key)
+    expect(cells).to_have_text([custom_value] * 4)
+    expect(cells.first).to_have_attribute("title", "string: transformer")
+    expect(cells.last).to_have_attribute("title", "string: moe")
+    expect(cells.last).to_have_class(re.compile(r"\bchanged\b"))
+    expect(cells.locator("b")).to_have_count(0)
+    page.locator("#config-full-names").check()
+    expect(header.locator(".config-path-text")).to_have_text(custom_name)
+    search = page.locator("#config-search")
+    search.fill(custom_name)
+    expect(table.locator("th[data-config-key]")).to_have_count(1)
+    with page.expect_download() as download:
+        page.get_by_role("button", name="Export CSV ↓", exact=True).click()
+    path = tmp_path / "config-display.csv"
+    download.value.save_as(path)
+    with path.open(newline="") as stream:
+        records = list(csv.reader(stream))
+    assert records[0] == ["Experiment", key]
+    assert [record[1] for record in records[1:]] == ["transformer"] * 3 + ["moe"]
+    assert not reads, "Display edits and label searches must reuse cached configuration data"
+    search.fill("")
+    page.get_by_role("button", name="Save as new view", exact=True).click()
+    dialog.get_by_label("View name", exact=True).fill("Display aliases")
+    dialog.get_by_role("button", name="Save", exact=True).click()
+    expect(page.locator("#named-view-status")).to_have_text("Saved")
+    page.reload()
+    expect(header.locator(".config-path-text")).to_have_text(custom_name)
+    expect(cells).to_have_text([custom_value] * 4)
+    expect(page.locator("#named-view-status")).to_have_text("Saved")
+    header.get_by_role("button", name=f"Customize text for {key}", exact=True).click()
+    dialog.get_by_label("Column name", exact=True).fill("Draft name")
+    dialog.get_by_role("button", name="Save", exact=True).click()
+    expect(header.locator(".config-path-text")).to_have_text("Draft name")
+    expect(page.locator("#named-view-status")).to_have_text("Modified")
+    page.get_by_role("button", name="Revert", exact=True).click()
+    expect(header.locator(".config-path-text")).to_have_text(custom_name)
+    header.get_by_role("button", name=f"Customize text for {key}", exact=True).click()
+    dialog.get_by_label("Column name", exact=True).fill("Saved architecture")
+    dialog.get_by_role("button", name="Save", exact=True).click()
+    page.get_by_role("button", name="Update view", exact=True).click()
+    expect(page.locator("#named-view-status")).to_have_text("Saved")
+    page.reload()
+    expect(header.locator(".config-path-text")).to_have_text("Saved architecture")
+    header.get_by_role("button", name=f"Customize text for {key}", exact=True).click()
+    dialog.get_by_role("button", name="Reset this field", exact=True).click()
+    dialog.get_by_role("button", name="Save", exact=True).click()
+    expect(header.locator(".config-path-text")).to_have_text(key)
+    expect(cells.first).to_have_text("transformer")
+    expect(cells.last).to_have_text("moe")
+    page.get_by_role("button", name="Revert", exact=True).click()
+    expect(header.locator(".config-path-text")).to_have_text("Saved architecture")
+    expect(cells.first).to_have_text(custom_value)
+
+
+@pytest.mark.ui_scenario("config-display")
+def test_configuration_text_editor_drafts_types_and_validation(ui_page):
+    page = ui_page
+    key = "display.value"
+    page.locator('#navigation [data-action="tab"][data-value="configs"]').click()
+    table = page.locator("#config-table")
+    header = table.locator(f'th[data-config-key="config:{key}"]')
+    cells = table.locator(f'td[data-config-field="config:{key}"]')
+    scalar = table.locator('td[data-config-field="scalar:evaluation-score"]')
+    expect(cells).to_have_text(["1", "1", "null", ""])
+    expect(scalar.first).to_have_text("0.95")
+    header.get_by_role("button", name=f"Customize text for {key}", exact=True).click()
+    dialog = page.locator("#dialog")
+
+    def fill_typed_mappings():
+        dialog.get_by_label("Column name", exact=True).fill("Typed values")
+        rows = dialog.locator("[data-config-text-rule]")
+        rows.first.get_by_label("Original value", exact=True).fill("1")
+        rows.first.get_by_label("Display text", exact=True).fill("Numeric")
+        dialog.get_by_role("button", name="+ Add value mapping", exact=True).click()
+        rows.last.get_by_label("Original value", exact=True).fill("1")
+        rows.last.get_by_label("Display text", exact=True).fill("String")
+        return rows
+
+    rows = fill_typed_mappings()
+    dialog.get_by_role("button", name="Save", exact=True).click()
+    expect(dialog).to_be_visible()
+    expect(dialog.locator("#config-display-error")).to_contain_text("only one display mapping")
+    rows.last.get_by_label("Original value", exact=True).fill('"1"')
+    dialog.get_by_role("button", name="+ Add value mapping", exact=True).click()
+    rows.last.get_by_label("Original value", exact=True).fill("null")
+    dialog.locator("#config-display-key").select_option("model.architecture")
+    dialog.get_by_label("Column name", exact=True).fill("Model")
+    dialog.locator("[data-config-text-rule]").first.get_by_label("Original value", exact=True).fill(
+        "transformer"
+    )
+    dialog.locator("[data-config-text-rule]").first.get_by_label("Display text", exact=True).fill(
+        "T"
+    )
+    dialog.locator("#config-display-key").select_option(key)
+    expect(dialog.get_by_label("Column name", exact=True)).to_have_value("Typed values")
+    expect(rows).to_have_count(3)
+    expect(rows.nth(1).get_by_label("Original value", exact=True)).to_have_value('"1"')
+    dialog.get_by_role("button", name="Cancel", exact=True).click()
+    expect(header.locator(".config-path-text")).to_have_text("value")
+    expect(cells).to_have_text(["1", "1", "null", ""])
+    page.get_by_role("button", name="Customize text", exact=True).click()
+    dialog.locator("#config-display-key").select_option(key)
+    expect(dialog.get_by_label("Column name", exact=True)).to_have_value("")
+    expect(dialog.locator("[data-config-text-rule]")).to_have_count(1)
+    rows = fill_typed_mappings()
+    rows.last.get_by_label("Original value", exact=True).fill('"1"')
+    dialog.get_by_role("button", name="+ Add value mapping", exact=True).click()
+    rows.last.get_by_label("Original value", exact=True).fill("null")
+    dialog.get_by_role("button", name="+ Add value mapping", exact=True).click()
+    rows.last.get_by_role("button", name="Remove value mapping", exact=True).click()
+    dialog.locator("#config-display-key").select_option("model.architecture")
+    dialog.get_by_label("Column name", exact=True).fill("Model")
+    dialog.locator("[data-config-text-rule]").first.get_by_label("Original value", exact=True).fill(
+        "transformer"
+    )
+    dialog.locator("[data-config-text-rule]").first.get_by_label("Display text", exact=True).fill(
+        "T"
+    )
+    with page.expect_response(
+        lambda response: saved_view(
+            response,
+            lambda view: len(view.get("configDisplay", {}).get(key, {}).get("values", [])) == 3,
+        )
+    ):
+        dialog.get_by_role("button", name="Save", exact=True).click()
+    expect(header.locator(".config-path-text")).to_have_text("Typed values")
+    expect(cells).to_have_text(["Numeric", "String", "", ""])
+    expect(cells.nth(2)).to_have_attribute("title", "object: null")
+    expect(cells.last).to_have_attribute("title", "Not set")
+    expect(cells.last).to_have_class(re.compile(r"\bchanged\b"))
+    expect(scalar.first).to_have_text("0.95")
+    expect(table.locator('th[data-config-key="config:model.architecture"] code')).to_have_text(
+        "Model"
+    )
+    expect(table.locator('td[data-config-field="config:model.architecture"]').first).to_have_text(
+        "T"
+    )
+    page.reload()
+    expect(cells).to_have_text(["Numeric", "String", "", ""])
+    expect(scalar.first).to_have_text("0.95")
+
+
 def test_configuration_baseline_preserves_order_and_highlights(ui_page, tmp_path):
     page = ui_page
     page.locator('#navigation [data-action="tab"][data-value="runs"]').click()
@@ -1466,6 +1903,226 @@ def test_configuration_search_reveals_ignored_and_identical_fields_without_inclu
     page.unroute("**/api/compare", delay_comparison)
 
 
+@pytest.mark.ui_scenario("onsets")
+def test_sustained_changes_sort_correlations_onsets_export_and_persist(ui_page, tmp_path):
+    page = ui_page
+    page.locator('#navigation [data-action="tab"][data-value="time"]').click()
+    expect(page.locator("#time-mode")).to_have_value("onsets")
+    analyze = page.locator("#analyze-time-button")
+    expect(analyze).to_be_disabled()
+    reference = page.get_by_role("combobox", name="Reference curve", exact=True)
+    choices = page.locator('#time-reference-list [role="option"]')
+    menu = page.locator("#time-reference-menu")
+    expect(page.locator("#time-reference-search")).to_have_count(0)
+    toggle = page.get_by_role("button", name="Show reference curves", exact=True)
+    toggle.click()
+    expect(menu).to_be_visible()
+    expect(reference).to_be_focused()
+    toggle.click()
+    expect(menu).not_to_be_visible()
+    reference.press("ArrowDown")
+    expect(menu).to_be_visible()
+    reference.press("Escape")
+    reference.fill("  ReFeReNcE  ")
+    expect(reference).to_have_attribute("aria-expanded", "true")
+    expect(choices).to_have_count(2)
+    expect(page.locator("#time-reference-count")).to_have_text("1 matching curve")
+    expect(analyze).to_be_disabled()
+    reference.press("Enter")
+    expect(reference).to_have_value("onset/reference")
+    expect(menu).not_to_be_visible()
+    expect(analyze).to_be_enabled()
+    reference.fill("EARLY")
+    expect(reference).to_have_attribute("data-reference-value", "onset/reference")
+    expect(choices).to_have_count(3)
+    expect(page.locator("#time-reference-count")).to_contain_text("selected reference retained")
+    reference.press("ArrowUp")
+    active = reference.get_attribute("aria-activedescendant")
+    assert page.locator("#" + active).get_attribute("aria-selected") == "true"
+    reference.press("Escape")
+    expect(reference).to_have_value("onset/reference")
+    expect(menu).not_to_be_visible()
+    reference.fill("no-such-curve")
+    expect(choices).to_have_count(2)
+    expect(page.locator("#time-reference-count")).to_contain_text("No matching curves")
+    reference.press("Enter")
+    expect(reference).to_have_attribute("data-reference-value", "onset/reference")
+    expect(menu).to_be_visible()
+    reference.press("ArrowUp")
+    active = reference.get_attribute("aria-activedescendant")
+    assert page.locator("#" + active).get_attribute("aria-selected") == "true"
+    reference.press("Enter")
+    expect(reference).to_have_value("onset/reference")
+    expect(menu).not_to_be_visible()
+    reference.fill("no-such-curve")
+    reference.press("Tab")
+    expect(reference).not_to_be_focused()
+    expect(reference).to_have_value("onset/reference")
+    expect(menu).not_to_be_visible()
+    reference.fill("EARLY")
+    page.get_by_role("option", name="onset/early", exact=True).click()
+    expect(reference).to_have_value("onset/early")
+    reference.fill("reference")
+    page.get_by_role("option", name="onset/reference", exact=True).click()
+    expect(reference).to_have_value("onset/reference")
+    reference.fill("")
+    eligible_count = choices.count()
+    assert eligible_count > 10
+    reference.press("Escape")
+    expect(page.locator("#onset-smoothing")).to_have_value("10")
+    expect(page.locator("#onset-duration")).to_have_value("20")
+    requests, pending = [], []
+
+    def hold_start(route):
+        response = route.fetch()
+        pending.append((route, response))
+
+    page.route("**/api/analysis/jobs", hold_start)
+    page.on(
+        "request",
+        lambda request: (
+            requests.append(request) if urlsplit(request.url).path == "/api/analysis/jobs" else None
+        ),
+    )
+    analyze.click()
+    expect(page.locator("#time-progress")).to_be_visible()
+    expect(analyze).to_be_disabled()
+    reference.fill("early")
+    expect(reference).to_have_attribute("data-reference-value", "onset/reference")
+    expect(page.locator("#time-progress")).to_be_visible()
+    deadline = time.monotonic() + 10
+    while not pending:
+        assert time.monotonic() < deadline
+        page.wait_for_timeout(20)
+    route, response = pending.pop()
+    with page.expect_response("**/api/analysis/jobs/*/result") as completed:
+        route.fulfill(response=response)
+    page.unroute("**/api/analysis/jobs", hold_start)
+    result = completed.value.json()
+    assert requests[0].post_data_json["kind"] == "onsets"
+    assert requests[0].post_data_json["onset_smoothing"] == 10
+    table = page.locator("#onset-results-table")
+    expect(table).to_be_visible()
+    expect(page.locator("#time-progress")).not_to_be_visible()
+    expect(page.locator("#onset-reference-summary")).to_contain_text("onset/reference")
+    expect(reference).to_have_value("early")
+    expect(choices).to_have_count(3)
+    assert len(result["curves"]) == eligible_count - 1
+    reference.press("Escape")
+
+    def row_order():
+        return table.locator("tbody tr[data-onset-tag]").evaluate_all(
+            "rows => rows.map(row => row.dataset.onsetTag)"
+        )
+
+    related = [row for row in result["rows"] if row["related"]]
+    assert row_order() == [
+        row["tag"]
+        for row in sorted(related, key=lambda row: (-abs(row["correlation"]), row["tag"]))
+    ]
+    assert row_order()[0] == "onset/identical"
+    page.locator("#onset-curves").evaluate("plot => window.__referenceFilterPlot = plot")
+    reference.fill("constant")
+    assert row_order()[0] == "onset/identical"
+    assert page.locator("#onset-curves").evaluate("plot => plot === window.__referenceFilterPlot")
+    reference.press("Escape")
+    expect(
+        table.locator('tr[data-onset-tag="onset/inverse"] [data-onset-correlation]')
+    ).to_contain_text("-")
+    page.locator("#onset-sort").select_option("onset")
+    expected = [
+        row["tag"]
+        for row in sorted(
+            related,
+            key=lambda row: (
+                row["onset"] if row["onset"] is not None else float("inf"),
+                row["tag"],
+            ),
+        )
+    ]
+    assert row_order() == expected
+    wait_for_plot(page, "#onset-curves")
+    wait_for_plot(page, "#onset-timeline")
+    assert page.locator("#onset-curves").evaluate(
+        "plot => plot.data.some(trace => trace.name === 'onset/reference')"
+    )
+    assert page.locator("#onset-curves").evaluate("plot => plot.layout.shapes.length") == 1
+    page.screenshot(path=str(tmp_path / "onset-analysis.png"), full_page=True)
+    page.locator("#onset-show-all").check()
+    search = page.locator("#time-result-filter")
+    search.fill("constant")
+    expect(table.locator("tbody tr[data-onset-tag]")).to_have_count(1)
+    assert row_order() == ["onset/constant"]
+    expect(table).to_contain_text("Constant in change interval")
+    assert page.locator("#onset-curves").evaluate(
+        "plot => plot.data.some(trace => trace.name === 'onset/reference')"
+    )
+    search.fill("")
+    expect(table.locator("tbody tr[data-onset-tag]")).to_have_count(8)
+    page.locator("#onset-sort").select_option("correlation")
+    page.locator('[data-action="time-next"]').click()
+    expect(table.locator("tbody tr[data-onset-tag]")).to_have_count(8)
+    with page.expect_download() as downloaded:
+        page.get_by_role("button", name="Export results CSV ↓", exact=True).click()
+    path = tmp_path / "onsets.csv"
+    downloaded.value.save_as(path)
+    with path.open(newline="") as stream:
+        records = list(csv.reader(stream))
+    assert len(records) == len(result["rows"]) + 1
+    correlations = [abs(float(row[1])) for row in records[1:] if row[1]]
+    assert correlations == sorted(correlations, reverse=True)
+    assert len(requests) == 1, "Sorting, browsing, and CSV export must not rerun the analysis"
+    page.locator("#onset-sort").select_option("onset")
+    page.get_by_role("button", name="Save as new view", exact=True).click()
+    dialog = page.locator("#dialog")
+    dialog.get_by_label("View name", exact=True).fill("Onset review")
+    dialog.get_by_role("button", name="Save", exact=True).click()
+    expect(page.locator("#named-view-status")).to_have_text("Saved")
+    reference.fill("unmatched-query")
+    expect(page.locator("#named-view-status")).to_have_text("Saved")
+    expect(reference).to_have_attribute("data-reference-value", "onset/reference")
+    reference.press("Escape")
+    page.locator("#onset-sort").select_option("correlation")
+    expect(page.locator("#named-view-status")).to_have_text("Modified")
+    with page.expect_navigation(wait_until="domcontentloaded"):
+        page.get_by_role("button", name="Revert", exact=True).click()
+    expect(page.locator("#time-mode")).to_have_value("onsets")
+    expect(page.locator("#time-reference")).to_have_value("onset/reference")
+    expect(page.locator("#onset-smoothing")).to_have_value("10")
+    with page.expect_response("**/api/analysis/jobs") as restarted:
+        page.locator("#analyze-time-button").click()
+    assert restarted.value.json()["reused"]
+    expect(page.locator("#onset-sort")).to_have_value("onset")
+    expect(page.locator("#onset-show-all")).to_be_checked()
+    expect(page.locator("#named-view-status")).to_have_text("Saved")
+    for mode in ("events", "periodicity"):
+        page.locator("#time-mode").select_option(mode)
+        expect(reference).to_have_value("onset/reference")
+        reference.fill("EARLY")
+        expect(choices).to_have_count(3)
+        expect(reference).to_have_attribute("data-reference-value", "onset/reference")
+        page.locator("#time-axis").click()
+        expect(menu).not_to_be_visible()
+        expect(reference).to_have_value("onset/reference")
+        page.keyboard.press("Escape")
+    reference.click()
+    page.get_by_role("option", name="Automatic · strongest activity", exact=True).click()
+    expect(reference).to_have_value("")
+    expect(reference).to_have_attribute("placeholder", "Automatic · strongest activity")
+    page.set_viewport_size({"width": 375, "height": 1000})
+    reference.scroll_into_view_if_needed()
+    reference.fill("early")
+    expect(menu).to_be_visible()
+    bounds = menu.bounding_box()
+    assert bounds and bounds["x"] >= 0 and bounds["x"] + bounds["width"] <= 375
+    page.screenshot(path=str(tmp_path / "reference-picker.png"))
+    reference.press("Escape")
+    page.locator("#time-experiment").select_option(index=1)
+    expect(reference).to_have_value("")
+    expect(menu).not_to_be_visible()
+
+
+@pytest.mark.ui_scenario("missing-condition")
 def test_experiments_configurations_relationships_and_time_series(ui_page):
     page = ui_page
     page.locator('#navigation [data-action="tab"][data-value="runs"]').click()
@@ -1476,12 +2133,73 @@ def test_experiments_configurations_relationships_and_time_series(ui_page):
     wait_for_plot(page, "#condition-chart")
     wait_for_plot(page, "#parallel-chart")
     expect(page.locator("#parallel-error")).not_to_be_visible()
-    page.locator("#condition-select").select_option("model.architecture")
+    condition = page.get_by_role("combobox", name="Condition", exact=True)
+    condition.click()
+    search = page.get_by_role("combobox", name="Filter Condition", exact=True)
+    expect(search).to_be_focused()
+    initial = condition.input_value()
+    search.fill("no-such-condition")
+    expect(page.get_by_text("No matching options", exact=True)).to_be_visible()
+    search.press("Enter")
+    expect(condition).to_have_value(initial)
+    search.fill("  ChItEc  ")
+    options = page.get_by_role("listbox", name="Condition", exact=True)
+    expect(options.get_by_role("option")).to_have_text(["model.architecture"])
+    expect(condition).to_have_value(initial)
+    search.press("Enter")
+    expect(search).to_have_count(0)
+    expect(condition).to_have_value("model.architecture")
     page.wait_for_function(
         "() => document.getElementById('condition-chart')._fullLayout.xaxis.type === 'category'"
     )
     labels = page.locator("#condition-chart").evaluate("plot => plot._fullLayout.xaxis.ticktext")
     assert "transformer" in labels and "moe" in labels
+    missing_path = "motion.reserve_endpoint_frame"
+    association = page.locator(f'.association[data-value="{missing_path}"]')
+    expect(association).to_be_visible()
+    condition.click()
+    search.fill("endpoint")
+    search.press("Enter")
+    expect(condition).to_have_value(missing_path)
+    missing = page.get_by_role("checkbox", name="Include missing as a category")
+    expect(missing).to_be_checked()
+    expect(page.get_by_role("checkbox", name="Merge missing and null")).to_be_checked()
+    page.wait_for_function(
+        "document.getElementById('condition-chart').data.some(trace => "
+        "trace.name === '(missing or null)' && trace.y.length === 3)"
+    )
+    with page.expect_response(
+        lambda response: saved_view(
+            response, lambda view: missing_path in view.get("excludedMissingConditions", [])
+        )
+    ):
+        missing.uncheck()
+    expect(missing).not_to_be_checked()
+    expect(association).to_have_count(0)
+    page.reload()
+    expect(condition).to_have_value(missing_path)
+    expect(missing).not_to_be_checked()
+    expect(association).to_have_count(0)
+    scope = page.locator("#association-scope")
+    scope.press("o")
+    scope_search = page.get_by_role("combobox", name="Filter Conditions", exact=True)
+    expect(scope_search).to_have_value("o")
+    scope_search.press("Escape")
+    expect(scope_search).to_have_count(0)
+    expect(scope).to_be_focused()
+    expect(scope).to_have_value("configurations")
+    page.get_by_role("button", name="Appearance", exact=False).click()
+    dialog = page.locator("#dialog")
+    preset = dialog.locator('select[name="appearance_preset"]')
+    preset.click()
+    preset_search = dialog.get_by_role("combobox", name="Filter Preset", exact=True)
+    preset_search.fill("ntrast")
+    dialog.get_by_role("listbox", name="Preset", exact=True).get_by_role(
+        "option", name="High contrast", exact=True
+    ).click()
+    expect(preset).to_have_value("contrast")
+    expect(dialog).to_be_visible()
+    dialog.get_by_role("button", name="Cancel", exact=True).click()
     page.locator('#navigation [data-action="tab"][data-value="time"]').click()
     analyze = page.get_by_role("button", name=re.compile(r"Analyze [1-9]\d* curves"))
     expect(analyze).to_be_enabled(timeout=60_000)

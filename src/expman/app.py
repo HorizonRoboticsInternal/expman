@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, JsonValue, model_validator
 
-from expman.analytics import analyze, curve_payload
+from expman.analytics import analyze, curve_groups, curve_payload
 from expman.config_scalars import scalar_comparison_rows
 from expman.configs import active_config, compare
 from expman.experiments import Experiment, ExperimentRepository
@@ -21,6 +21,7 @@ from expman.filters import matches
 from expman.jobs import AnalysisJobs
 from expman.json_metrics import JSONMetrics
 from expman.native import NativeTensorBoard
+from expman.onsets import sustained_change_analysis
 from expman.paths import migrate_legacy_state, user_directory, workspace_state_path
 from expman.store import StateStore
 from expman.tensorboard_data import TensorBoardScalars, fast_metadata, metric_preview
@@ -96,7 +97,10 @@ class AnalysisRequest(Selection):
     categorical_conditions: list[Annotated[str, Field(min_length=1, max_length=4000)]] = Field(
         default_factory=list, max_length=2000
     )
-    missing_conditions: list[Annotated[str, Field(min_length=1, max_length=4000)]] = Field(
+    missing_conditions: list[Annotated[str, Field(min_length=1, max_length=4000)]] | None = Field(
+        default=None, max_length=2000
+    )
+    excluded_missing_conditions: list[Annotated[str, Field(min_length=1, max_length=4000)]] = Field(
         default_factory=list, max_length=2000
     )
     separate_null_conditions: list[Annotated[str, Field(min_length=1, max_length=4000)]] = Field(
@@ -175,8 +179,18 @@ class PeriodicityRequest(TimeSeriesRequest):
     windowed: bool = False
 
 
-class AnalysisJobRequest(EventRequest, PeriodicityRequest):
-    kind: Literal["events", "periodicity"] = "events"
+class OnsetRequest(TimeSeriesRequest):
+    onset_baseline_start: float | None = Field(default=None, allow_inf_nan=False)
+    onset_baseline_end: float | None = Field(default=None, allow_inf_nan=False)
+    onset_smoothing: float = Field(default=50, ge=0, allow_inf_nan=False)
+    onset_duration: float = Field(default=50, gt=0, allow_inf_nan=False)
+    onset_threshold: float = Field(default=5, ge=1, allow_inf_nan=False)
+    onset_min_correlation: float = Field(default=0.7, ge=0, le=1, allow_inf_nan=False)
+    onset_min_change_correlation: float = Field(default=0.15, ge=0, le=1, allow_inf_nan=False)
+
+
+class AnalysisJobRequest(EventRequest, PeriodicityRequest, OnsetRequest):
+    kind: Literal["events", "periodicity", "onsets"] = "events"
 
 
 class ViewRequest(BaseModel):
@@ -818,6 +832,16 @@ def create_app(
 
         return store.update(mutate)
 
+    @app.post("/api/curves/groups")
+    def list_curve_groups(selection: CurveRequest):
+        groups = curve_groups(
+            repository.select(selection.experiment_ids), store.read(), selection.model_dump()
+        )
+        return [
+            {"id": identifier, "name": name, "member_ids": [item.id for item in members]}
+            for identifier, name, members in groups
+        ]
+
     @app.post("/api/curves")
     def curves(selection: CurveRequest):
         selected = repository.select(selection.experiment_ids)
@@ -920,6 +944,7 @@ def create_app(
             categorical_conditions=selection.categorical_conditions,
             missing_conditions=selection.missing_conditions,
             separate_null_conditions=selection.separate_null_conditions,
+            excluded_missing_conditions=selection.excluded_missing_conditions,
         )
         result["condition_scope"] = selection.condition_scope
         for record in result["records"]:
@@ -1008,6 +1033,23 @@ def create_app(
             and selection.min_period >= selection.max_period
         ):
             raise ValueError("Minimum period must be smaller than maximum period")
+        if isinstance(selection, OnsetRequest) and (
+            not isinstance(selection, AnalysisJobRequest) or selection.kind == "onsets"
+        ):
+            if not selection.reference:
+                raise ValueError("Choose a reference curve for sustained-change analysis")
+            if (
+                selection.onset_baseline_start is not None
+                and selection.onset_baseline_end is not None
+                and selection.onset_baseline_start >= selection.onset_baseline_end
+            ):
+                raise ValueError("The baseline start must be before its end")
+            if (
+                selection.start is not None
+                and selection.onset_baseline_end is not None
+                and selection.onset_baseline_end > selection.start
+            ):
+                raise ValueError("The baseline must end before the change interval")
 
     @app.post("/api/analysis/jobs", status_code=202)
     def start_analysis(selection: AnalysisJobRequest):
@@ -1042,6 +1084,16 @@ def create_app(
     def periodicity(selection: PeriodicityRequest):
         validate_time_window(selection)
         return periodicity_analysis(
+            repository,
+            repository.get(selection.experiment_id),
+            selection.tags,
+            selection.model_dump(),
+        )
+
+    @app.post("/api/onsets")
+    def onsets(selection: OnsetRequest):
+        validate_time_window(selection)
+        return sustained_change_analysis(
             repository,
             repository.get(selection.experiment_id),
             selection.tags,

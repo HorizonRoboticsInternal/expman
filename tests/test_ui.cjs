@@ -14,7 +14,7 @@ const configCellMarkup = (id, field) => {
   return match ? match[0] : "";
 };
 const element = identifier => {
-  if (!elements.has(identifier)) elements.set(identifier, {innerHTML: "", textContent: "", dataset: {}, style: {setProperty() {}}, classList: {add() {}, toggle() {}}, querySelectorAll: () => [], appendChild(child) { child.parentNode = this; return child; }, handlers: {}, on(name, handler) { this.handlers[name] = handler; }, addEventListener(name, handler) { this.handlers[name] = handler; }, showModal() { this.open = true; }, close() { this.open = false; if (this.handlers.close) this.handlers.close(); }});
+  if (!elements.has(identifier)) elements.set(identifier, {innerHTML: "", textContent: "", dataset: {}, attributes: {}, setAttribute(name, value) { this.attributes[name] = value; }, removeAttribute(name) { delete this.attributes[name]; }, style: {setProperty() {}}, classList: {add() {}, toggle() {}}, querySelectorAll: () => [], appendChild(child) { child.parentNode = this; return child; }, handlers: {}, on(name, handler) { this.handlers[name] = handler; }, addEventListener(name, handler) { this.handlers[name] = handler; }, showModal() { this.open = true; }, close() { this.open = false; if (this.handlers.close) this.handlers.close(); }});
   return elements.get(identifier);
 };
 const context = {
@@ -45,9 +45,9 @@ const context = {
   console
 };
 vm.createContext(context);
-for (const filename of ["panels.js", "signals.js", "appearance.js", "filters.js", "configurations.js", "relationships.js", "views.js"]) vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/expman/static/", filename), "utf8"), context);
+for (const filename of ["panels.js", "signals.js", "appearance.js", "filters.js", "configurations.js", "relationships.js", "onsets.js", "views.js"]) vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/expman/static/", filename), "utf8"), context);
 let source = fs.readFileSync(path.join(__dirname, "../src/expman/static/app.js"), "utf8");
-source = source.replace(/  boot\(\)\.catch\(error => .*\);/, "  window.testApp = {state, renderOverview, renderTime, analyzeTime, pollTimeJob, cancelTime, renderEvents, renderPeriodicity, renderConfigTable, renderConfigs, renderAnalysis, renderCondition, renderParallel, renderView, setPanelSize, setPanelLogY, expandPanel, actions, selectionChanged, moveConfigRow, configurationRows, configScalarDialog, saveConfigScalar, updateConfigExclusions, pollConfigScalars, ensureConfigScalars, pollFullPanel, pollRelationships, cancelRelationships, relationshipRequest, loadJSONMetrics, pollJSONMetrics, drawCurvePanel, fullPanelKey};");
+source = source.replace(/  boot\(\)\.catch\(error => .*\);/, "  window.testApp = {state, renderOverview, renderTime, renderOnsets, analyzeTime, pollTimeJob, cancelTime, renderEvents, renderPeriodicity, renderConfigTable, renderConfigs, renderAnalysis, renderCondition, renderParallel, renderView, setPanelSize, setPanelLogY, expandPanel, actions, selectionChanged, moveConfigRow, configurationRows, configScalarDialog, saveConfigScalar, updateConfigExclusions, pollConfigScalars, ensureConfigScalars, pollFullPanel, pollRelationships, cancelRelationships, relationshipRequest, loadJSONMetrics, pollJSONMetrics, drawCurvePanel, fullPanelKey};");
 vm.runInContext(source, context);
 
 async function main() {
@@ -55,6 +55,8 @@ async function main() {
   state.workspace = {settings: {appearance: {font_size: 18, font_family: "georgia"}}};
   state.tab = "overview";
   state.serial = 1;
+  state.runs = [{id: "sample", name: "Sample", path: "sample", config: {}}];
+  state.selected = new Set(["sample"]);
   state.tags = ["Eval/reward", "Train/loss/actor", "Train/loss/critic", "Train/reward"];
   state.panels = state.tags;
   state.showAllPanels = true;
@@ -271,6 +273,8 @@ async function main() {
   await jsonChoicesBeforeTensorBoard();
   await configExclusionRaces();
   transposedConfigRegressions();
+  configurationDisplayRegressions();
+  await onsetRenderingRegressions();
   await overviewLegendAndElapsed();
   await overviewBrowserSmoothing();
   await fullValueRenderRaces();
@@ -1057,7 +1061,7 @@ async function conditionGroupingControls() {
     Object.assign(state, {workspace: {name: "Grouping", settings: {appearance: {}}, state: {groups: [], ignored_configs: [], ignored_files: [], named_filters: []}},
       runs: records.map(record => ({...record, path: record.id, metrics: {}, tags: []})), selected: new Set(records.map(record => record.id)), tab: "analysis",
       tags: ["loss"], summaryTags: [], metric: "loss", relationshipMetric: "", relationshipReduction: "", relationshipSmoothing: null,
-      categoricalConditions: [], missingConditions: [], separateNullConditions: [], configScalars: [], configOrder: [], associationScope: "all",
+      categoricalConditions: [], excludedMissingConditions: [], separateNullConditions: [], configScalars: [], configOrder: [], associationScope: "all",
       analysis: null, analysisWindow: {}, relationshipKey: "", relationshipJob: null, relationshipStarting: false, relationshipError: "",
       condition: "numeric", parallelKeys: ["numeric", "nullable"], parallelKeysConfigured: true});
     context.fetch = async (url, options) => {
@@ -1081,14 +1085,18 @@ async function conditionGroupingControls() {
     assert(requests[requests.length - 1].categorical_conditions.includes("numeric"));
     await change("condition-select", {value: "nullable"});
     assert.equal(element("condition-type").value, "auto");
-    assert(!element("condition-missing").checked);
-    assert(element("condition-merge-null").checked && element("condition-merge-null").disabled);
-    await change("condition-missing", {checked: true});
+    assert(element("condition-missing").checked);
     assert(element("condition-merge-null").checked && !element("condition-merge-null").disabled);
     const merged = element("condition-chart").data.find(trace => trace.name === "(missing or null)");
     assert(merged && merged.y.length === 2);
     assert.equal(element("parallel-chart").data[0].dimensions[1].values[4], element("parallel-chart").data[0].dimensions[1].values[5]);
-    assert(state.pendingView.missingConditions.includes("nullable"));
+    await change("condition-missing", {checked: false});
+    assert(element("condition-merge-null").disabled);
+    assert(!element("condition-chart").data.some(trace => trace.name === "(missing or null)"));
+    assert(state.pendingView.excludedMissingConditions.includes("nullable"));
+    assert(requests[requests.length - 1].excluded_missing_conditions.includes("nullable"));
+    await change("condition-missing", {checked: true});
+    assert(!state.pendingView.excludedMissingConditions.length);
     await change("condition-merge-null", {checked: false});
     assert(element("condition-chart").data.some(trace => trace.name === "(missing)" && trace.y.length === 1));
     assert(element("condition-chart").data.some(trace => trace.name === "null" && trace.y.length === 1));
@@ -1096,7 +1104,7 @@ async function conditionGroupingControls() {
     assert(requests[requests.length - 1].separate_null_conditions.includes("nullable"));
     await change("condition-select", {value: "numeric"});
     assert.equal(element("condition-type").value, "categorical");
-    assert(!element("condition-missing").checked);
+    assert(element("condition-missing").checked);
     await change("condition-type", {value: "auto"});
     assert.equal(element("condition-chart").data[0].type, "scatter");
     assert(!requests[requests.length - 1].categorical_conditions.length);
@@ -1316,9 +1324,13 @@ async function overviewLegendAndElapsed() {
       runs: ["first", "second", "third"].map(id => ({id, name: id, path: id, config: {}, metrics: {}, tags: [], warnings: [], modified: 0})), selected: new Set(["first", "second", "third"]),
       tab: "overview", tags, panels: tags, showAllPanels: false, panelPage: 0, panelQuery: "", query: "", filters: [], collection: "all", metricsLoading: false,
       overviewColors: {}, panelSmoothing: {}, panelData: new Map(), hiddenOverviewCurves: [], overviewLegendEntries: new Map(), overviewLegendSignature: "", expandedPanel: null, options: {...state.options, x_axis: "step", group: "saved", ignoreOutliers: false}, fullPanels: {}});
-    context.fetch = async url => {
+    context.fetch = async (url, options) => {
+      if (url === "/api/curves/groups") return {ok: true, json: async () => curves};
       assert.equal(url, "/api/curves"); calls += 1;
-      return {ok: true, json: async () => ({curves: Object.fromEntries(tags.map((tag, index) => [tag, omitGroup ? curves.slice(0, 1) : index ? curves.slice().reverse() : curves]))})};
+      const request = JSON.parse(options.body);
+      const matching = (omitGroup ? curves.slice(0, 1) : curves).filter(curve =>
+        (!request.group_ids || request.group_ids.includes(curve.id)) && curve.member_ids.some(id => request.experiment_ids.includes(id)));
+      return {ok: true, json: async () => ({curves: Object.fromEntries(tags.map((tag, index) => [tag, index ? matching.slice().reverse() : matching]))})};
     };
     await app.renderOverview(state.serial);
     const first = element("curve-0"), other = element("curve-1");
@@ -1460,12 +1472,13 @@ async function overviewLegendAndElapsed() {
     await app.renderOverview(state.serial);
     assert.equal(first.data[0].legendgroup, "config:" + JSON.stringify([["learning_rate"], "Group"]));
     const moved = first.data.find(trace => trace.legendgroup === configKey);
-    assert.equal(moved.visible, "legendonly");
-    assert.equal(moved.line.color, "#112233");
+    assert.equal(moved, undefined);
     state.panelPage = 0; await app.renderOverview(state.serial);
-    assert.equal(first.data[0].legendgroup, configKey);
-    assert.equal(first.data[0].visible, "legendonly");
-    assert.equal(first.data[0].line.color, "#112233");
+    assert(!first.data.some(trace => trace.legendgroup === configKey));
+    await app.actions["toggle-overview-curve"](configKey);
+    const revealed = first.data.find(trace => trace.legendgroup === configKey);
+    assert.equal(revealed.visible, true);
+    assert.equal(revealed.line.color, "#112233");
     const original = curves[0].original_y;
     delete curves[0].original_y;
     state.options.smoothing = 0.4; await app.renderOverview(state.serial);
@@ -1555,6 +1568,9 @@ async function overviewBrowserSmoothing() {
     element("panel-dialog").close();
     state.panelPage = 1; await app.renderOverview(state.serial);
     assert.equal(state.panelSmoothing[tags[2]], .9);
+    assert.equal(calls.length, fullCalls, "Hidden groups should not be fetched for newly opened panels");
+    assert.equal(element("curve-0").data.length, 0);
+    await app.actions["show-all-curves"]();
     assert(Math.abs(mean(element("curve-0")).y[1] - 70 / 19) < 1e-12);
     console.log("Browser controls: independent panel smoothing, explicit global apply, expanded controls, original values, cached full reads, colors, hidden curves, and off-page settings verified without smoothing requests");
   } finally {
@@ -1675,6 +1691,73 @@ async function automaticPanelLoading() {
     context.window.innerHeight = previousHeight;
     for (let index = 0; index < 9; index += 1) delete element("curve-" + index).getBoundingClientRect;
   }
+}
+
+async function onsetRenderingRegressions() {
+  const app = context.window.testApp, state = app.state, previous = {...state}, before = requests.length;
+  try {
+    const rows = [{tag: "early", correlation: .8, change_correlation: .6, onset: 50, delay: -50, direction: "rise", related: true}, {tag: "inverse", correlation: -.98, change_correlation: -.9, onset: 80, delay: -20, direction: "fall", related: true}, {tag: "flat", correlation: null, change_correlation: null, onset: null, delay: null, direction: null, related: false}].map(row => ({...row, onset_bracket: row.onset == null ? null : [row.onset, row.onset], status: row.onset == null ? "Constant in change interval" : "Detected"}));
+    const curve = {x: [0, 50, 80, 100, 200], y: [0, 0, .5, 1, 0], raw: [0, 0, .5, 1, 0], baseline: [0, 0, 0, 0, 0], segments: [1, 1, 1, 1, 1]};
+    Object.assign(state, {tab: "time", time: {...state.time, ...context.window.ExpmanOnsets.defaults, mode: "onsets"}, timePlotQuery: "", timePlotPage: 0,
+      timeData: {reference: "reference", reference_result: {onset: 100, direction: "rise"}, rows, curves: {reference: curve, early: curve, inverse: curve, flat: curve},
+        analysis: {start: 0, end: 200, baseline_start: -100, baseline_end: 0, resolution: 10, smoothing_span: 50, sustain_span: 50, related_curves: 2}, note: "Temporal association"}});
+    await app.renderOnsets();
+    const order = () => Array.from(element("time-results").innerHTML.matchAll(/data-onset-tag="([^"]+)"/g), item => item[1]);
+    const lines = element("onset-curves").data.filter(trace => trace.mode === "lines");
+    assert.equal(new Set(lines.map(trace => trace.line.color)).size, lines.length);
+    assert.deepEqual(order(), ["inverse", "early"]);
+    assert(element("time-results").innerHTML.includes("Correlation · strongest |r|"));
+    assert(element("time-results").innerHTML.includes("reference"));
+    await documentHandlers.change({target: {id: "onset-sort", value: "onset"}});
+    assert.deepEqual(order(), ["early", "inverse"]);
+    assert.equal(state.pendingView.time.onset_sort, "onset");
+    await documentHandlers.change({target: {id: "onset-show-all", checked: true}});
+    assert.deepEqual(order(), ["early", "inverse", "flat"]);
+    assert(element("time-results").innerHTML.includes("Constant in change interval"));
+    state.timePlotQuery = "early";
+    await app.renderOnsets();
+    assert.deepEqual(order(), ["early"]);
+    assert(element("onset-curves").data.some(trace => trace.name === "reference"));
+    assert.equal(requests.length, before, "Onset sorting and browsing must reuse cached results");
+  } finally { Object.assign(state, previous); }
+}
+
+function configurationDisplayRegressions() {
+  const app = context.window.testApp, state = app.state, previous = {...state}, before = requests.length;
+  try {
+    const experiments = [{id: "a", name: "First"}, {id: "b", name: "Second"}];
+    const rows = [
+      {key: "model.kind", cells: [{present: true, value: "transformer"}, {present: true, value: "moe"}]},
+      {key: "typed", cells: [{present: true, value: 1}, {present: true, value: "1"}]},
+      {key: "optional", cells: [{present: true, value: null}, {present: false, value: null}]},
+      {key: "toString", cells: [{present: true, value: "original"}, {present: true, value: "other"}]}
+    ].map(field => ({...field, kind: "config", different: true, ignored: false}));
+    const scalar = {key: "loss", id: "scalar:loss", kind: "scalar", scalar: {id: "loss", tag: "loss", mode: "latest", smoothing: .4, highlight: "none"}, cells: [{present: true, value: 1}, {present: true, value: 2}]};
+    Object.assign(state, {workspace: {settings: {appearance: {}}, state: {ignored_configs: [], ignored_files: []}},
+      runs: experiments.map((item, index) => ({...item, config: Object.fromEntries(rows.filter(row => row.cells[index].present).map(row => [row.key, row.cells[index].value])), metrics: {}})),
+      comparison: {experiments, rows: rows.concat(scalar)}, selected: new Set(["a", "b"]), baseline: "a",
+      configDisplay: context.window.ExpmanConfigurations.displayPreferences({"model.kind": {name: "<b>Model</b>", values: [{value: "transformer", text: "Same"}, {value: "moe", text: "Same"}]}, typed: {name: "", values: [{value: 1, text: "Numeric"}, {value: "1", text: "<img src=x>"}]}, optional: {name: "", values: [{value: null, text: ""}]}}),
+      configPage: 0, configQuery: "", configFullNames: true, configOrder: [], configColumnWidths: {}, configResizing: null, diffOnly: false, showIgnored: false, sort: "name"});
+    app.renderConfigTable();
+    const html = element("view").innerHTML;
+    assert(html.includes('title="model.kind">&lt;b&gt;Model&lt;/b&gt;</code>'));
+    assert(configCellMarkup("a", "config:model.kind").includes('>Same</td>'));
+    assert(configCellMarkup("b", "config:model.kind").includes("changed"));
+    assert(configCellMarkup("a", "config:typed").includes('>Numeric</td>'));
+    assert(configCellMarkup("b", "config:typed").includes('&lt;img src=x&gt;'));
+    assert(configCellMarkup("b", "config:typed").includes('title="string: 1"'));
+    assert(configCellMarkup("a", "config:optional").endsWith('></td>'));
+    assert(configCellMarkup("b", "config:optional").endsWith('></td>'));
+    assert(configCellMarkup("b", "config:optional").includes("changed"));
+    assert(configCellMarkup("a", "scalar:loss").includes('>1</td>'));
+    assert(configCellMarkup("a", "config:toString").includes('>original</td>'));
+    state.configQuery = "<b>model";
+    assert.deepEqual(Array.from(app.configurationRows()).map(row => row.key), ["model.kind"]);
+    app.actions["config-display"]("model.kind");
+    assert(element("dialog").innerHTML.includes('value="&lt;b&gt;Model&lt;/b&gt;"'));
+    assert(element("dialog").innerHTML.includes('value="&quot;transformer&quot;"'));
+    assert.equal(requests.length, before, "Display customizations use cached comparison values");
+  } finally { Object.assign(state, previous); }
 }
 
 function transposedConfigRegressions() {
