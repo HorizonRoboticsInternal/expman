@@ -819,7 +819,7 @@ async function overviewExperimentSearch() {
     state.filters = [];
     assert(elements.get("view").innerHTML.includes('id="smoothing-value" type="number"'));
     const numeric = {id: "smoothing-value", dataset: {}, value: "0.9375", closest: () => null};
-    documentHandlers.input({target: numeric});
+    await documentHandlers.input({target: numeric});
     assert.equal(element("smoothing").value, "0.9375");
     await documentHandlers.change({target: numeric});
     assert.equal(state.options.smoothing, .9375);
@@ -833,7 +833,7 @@ async function overviewExperimentSearch() {
     }
     assert.equal(submitted.length, beforeInvalidSmoothing);
     const slider = {id: "smoothing", dataset: {}, value: "0.999", closest: () => null};
-    documentHandlers.input({target: slider});
+    await documentHandlers.input({target: slider});
     assert.equal(element("smoothing-value").value, "0.999");
     await documentHandlers.change({target: slider});
     assert.equal(state.options.smoothing, .999);

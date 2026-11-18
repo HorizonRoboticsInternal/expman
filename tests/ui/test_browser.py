@@ -74,6 +74,12 @@ def change_number(locator, value):
     locator.press("Tab")
 
 
+def type_smoothing(control, value):
+    control.press("ControlOrMeta+a")
+    control.press_sequentially(value, delay=100)
+    expect(control).to_have_value(value)
+
+
 def enable_fast_auto_refresh(page):
     page.evaluate("""() => {
       const interval = window.setInterval.bind(window);
@@ -167,7 +173,7 @@ def test_independent_and_global_smoothing_reuses_observations(ui_page):
         ),
     )
     before = main_traces(page)
-    change_number(page.locator("#smoothing-value"), 0.9)
+    type_smoothing(page.locator("#smoothing-value"), "0.9")
     assert main_traces(page)[0]["y"] == before[0]["y"]
     with page.expect_response(
         lambda response: saved_view(
@@ -181,19 +187,33 @@ def test_independent_and_global_smoothing_reuses_observations(ui_page):
         assert first["y"][1] == pytest.approx(
             (0.9 * first["original"][0] + first["original"][1]) / 1.9
         )
-    first_control = page.locator('input[type="number"][data-panel-smoothing="train/loss"]')
+    first_control = page.locator('#view input[type="number"][data-panel-smoothing="train/loss"]')
     with page.expect_response(
         lambda response: saved_view(
             response, lambda view: view["panelSmoothing"].get("train/loss") == 0.2
         )
     ):
-        change_number(first_control, 0.2)
+        type_smoothing(first_control, "0.2")
+        first_control.press("Tab")
     expect(page.locator('input[type="number"][data-panel-smoothing="eval/reward"]')).to_have_value(
         "0.9"
     )
     expect(page.locator("#smoothing-value")).to_have_value("0.9")
     first = main_traces(page)[0]
     assert first["y"][1] == pytest.approx((0.2 * first["original"][0] + first["original"][1]) / 1.2)
+    page.get_by_role("button", name="Expand panel train/loss", exact=True).click()
+    dialog = page.locator("#panel-dialog")
+    expanded_control = dialog.locator('input[type="number"][data-panel-smoothing="train/loss"]')
+    type_smoothing(expanded_control, "0.9")
+    expect(first_control).to_have_value("0.9")
+    with page.expect_response(
+        lambda response: saved_view(
+            response, lambda view: view["panelSmoothing"].get("train/loss") == 0.2
+        )
+    ):
+        type_smoothing(expanded_control, "0.2")
+        expanded_control.press("Tab")
+    dialog.get_by_role("button", name="Close", exact=True).click()
     assert not calls, "Smoothing changes must reuse the browser's loaded observations"
     page.reload()
     wait_for_overview(page)
@@ -944,7 +964,8 @@ def test_combined_metrics_scaling_smoothing_and_persistence(ui_page):
     page.locator("#combined-scale").select_option("raw")
     for trace in traces():
         assert trace["y"] == trace["smoothed"]
-    change_number(page.locator("#combined-smoothing"), 0.9)
+    type_smoothing(page.locator("#combined-smoothing"), "0.9")
+    page.locator("#combined-smoothing").press("Tab")
     for trace in traces():
         assert trace["smoothed"][1] == pytest.approx(
             (0.9 * trace["original"][0] + trace["original"][1]) / 1.9

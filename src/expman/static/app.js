@@ -69,6 +69,7 @@
   const empty = (title, text) => `<div class="empty"><h2>${escape(title)}</h2><p>${escape(text)}</p></div>`;
   const loading = text => `<div class="empty"><div class="spinner"></div><p>${escape(text)}</p></div>`;
   const optionalNumber = value => value.trim() === "" ? null : Number(value);
+  const validSmoothing = value => Number.isFinite(value) && value >= 0 && value <= .999;
   const notify = (message, error = false) => {
     const toast = byId("toast");
     toast.textContent = message;
@@ -472,12 +473,14 @@
     return `<label class="panel-smoothing-control" title="Smoothing"><span class="panel-smoothing-label">Smooth</span><input type="range" min="0" max="0.999" step="any" data-panel-smoothing="${escape(tag)}" value="${value}" aria-label="Smoothing slider for ${escape(tag)}"><input type="number" min="0" max="0.999" step="any" inputmode="decimal" data-panel-smoothing="${escape(tag)}" value="${value}" aria-label="Smoothing factor for ${escape(tag)}"></label>`;
   }
 
-  function updateSmoothingControls() {
+  function updateSmoothingControls(source) {
     for (const id of ["smoothing", "smoothing-value"]) {
       const control = byId(id);
-      if (control) control.value = String(state.options.smoothing);
+      if (control && control !== source) control.value = String(state.options.smoothing);
     }
-    document.querySelectorAll("[data-panel-smoothing]").forEach(control => { control.value = String(panelSmoothing(control.dataset.panelSmoothing)); });
+    document.querySelectorAll("[data-panel-smoothing]").forEach(control => {
+      if (control !== source) control.value = String(panelSmoothing(control.dataset.panelSmoothing));
+    });
   }
 
   function redrawSmoothing(tags) {
@@ -501,21 +504,25 @@
     return pending.promise;
   }
 
-  async function setSmoothing(value, tag) {
-    if (value == null || !Number.isFinite(value) || value < 0 || value > .999) {
+  async function setSmoothing(value, tag, source) {
+    if (!validSmoothing(value)) {
       updateSmoothingControls();
       throw new Error("Smoothing must be a number between 0 and 0.999");
     }
     if (tag == null) state.options.smoothing = value;
     else state.panelSmoothing = {...state.panelSmoothing, [tag]: value};
-    updateSmoothingControls(); remember();
+    updateSmoothingControls(source); remember();
     if (tag != null) await redrawSmoothing([tag]);
   }
 
   async function applyGlobalSmoothing() {
     const tags = Array.from(new Set(state.tags.concat(state.panels, Object.keys(state.panelSmoothing))));
     state.panelSmoothing = Object.fromEntries(tags.map(tag => [tag, state.options.smoothing]));
-    if (state.combinedPlot) state.combinedPlot.smoothing = state.options.smoothing;
+    if (state.combinedPlot) {
+      state.combinedPlot.smoothing = state.options.smoothing;
+      const control = byId("combined-smoothing");
+      if (control) control.value = String(state.combinedPlot.smoothing);
+    }
     updateSmoothingControls(); remember();
     await redrawSmoothing(state.visiblePanelTags);
     if (state.combinedPlot && byId("combined-chart")) await renderCombined(state.serial);
@@ -1069,7 +1076,6 @@
       if (full && state.combinedFull && state.combinedFull.result === result) { state.combinedFull.rendered = true; state.combinedFull.error = null; }
       updateCombinedFullControl();
       bindCombinedInteractions(target);
-      byId("combined-smoothing").value = String(current.smoothing);
       byId("combined-status").textContent = traces.length + " metrics · " + (full ? "all values loaded" : "TensorBoard retained samples") + " · " + (current.scale === "raw" ? "Shared original-value scale" : (fitted ? "Each curve independently scaled in the fitted time interval" : "Scaling uses each smoothed curve's loaded values")) + (missing.length ? " · No observations: " + missing.join(", ") : "");
       if (missing.length) byId("combined-status").innerHTML = `<span>${escape(traces.length + " metrics · " + (state.metricsLoading ? "Still indexing: " : "No observations: ") + missing.join(", "))}</span><button class="button compact" data-action="retry-combined">Retry metrics</button>`;
     } catch (error) {
@@ -3221,7 +3227,7 @@
     }
     if (element.id === "combined-smoothing" && state.combinedPlot) {
       const value = optionalNumber(element.value);
-      if (value != null && Number.isFinite(value) && value >= 0 && value <= .999) { state.combinedPlot.smoothing = value; remember(); execute(() => renderCombined(state.serial)); }
+      if (validSmoothing(value) && value !== state.combinedPlot.smoothing) { state.combinedPlot.smoothing = value; remember(); execute(() => renderCombined(state.serial)); }
       return;
     }
     if (element.closest('[data-form="appearance"]')) previewAppearance();
@@ -3229,15 +3235,12 @@
     if (element.id === "choice-search") document.querySelectorAll("[data-choice]").forEach(choice => { choice.hidden = !choice.dataset.choice.includes(element.value.toLowerCase()); });
     if (["smoothing", "smoothing-value"].includes(element.id)) {
       const value = optionalNumber(element.value);
-      if (value != null && Number.isFinite(value) && value >= 0 && value <= .999) {
-        byId(element.id === "smoothing" ? "smoothing-value" : "smoothing").value = element.value;
-        execute(() => setSmoothing(value));
-      }
+      if (validSmoothing(value)) return execute(() => setSmoothing(value, null, element));
       return;
     }
     if (element.dataset && typeof element.dataset.panelSmoothing === "string") {
       const value = optionalNumber(element.value);
-      if (value != null && Number.isFinite(value) && value >= 0 && value <= .999) execute(() => setSmoothing(value, element.dataset.panelSmoothing));
+      if (validSmoothing(value)) return execute(() => setSmoothing(value, element.dataset.panelSmoothing, element));
       return;
     }
     if (element.id === "panel-filter") {
@@ -3289,7 +3292,7 @@
       if (identifier === "combined-scale") { state.combinedPlot.scale = element.value; state.combinedPlot.scaleWindow = null; }
       else {
         const value = optionalNumber(element.value);
-        if (value == null || !Number.isFinite(value) || value < 0 || value > .999) { element.value = String(state.combinedPlot.smoothing); throw new Error("Smoothing must be between 0 and 0.999"); }
+        if (!validSmoothing(value)) { element.value = String(state.combinedPlot.smoothing); throw new Error("Smoothing must be between 0 and 0.999"); }
         if (value === state.combinedPlot.smoothing) return;
         state.combinedPlot.smoothing = value;
       }
